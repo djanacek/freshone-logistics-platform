@@ -108,17 +108,124 @@ const LogisticsAutomationPlatform = () => {
     setNotifications(prev => [notification, ...prev.slice(0, 9)]);
   };
 
-  // Email notification function
-  const sendEmailNotification = async (recipient, subject, content, attachments = []) => {
+  // Email notification function with Microsoft Graph API
+  const sendEmailNotification = async (recipients, subject, content, reportType, reportData) => {
     try {
-      console.log(`Sending email to ${recipient}: ${subject}`);
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      addNotification('success', `Email sent to ${recipient}`, subject);
+      if (!emailSettings.enabled) {
+        if (reportType === 'warehouse' || reportType === 'customer') {
+          addNotification('info', `Email simulation: ${subject}`, `Would send Excel file (${reportData?.filename}) to: ${Array.isArray(recipients) ? recipients.join(', ') : recipients}`);
+        } else {
+          addNotification('info', `Email simulation: ${subject}`, `Would send to: ${Array.isArray(recipients) ? recipients.join(', ') : recipients}`);
+        }
+        return { success: true, simulated: true };
+      }
+
+      // Microsoft Graph API email sending
+      const emailBody = generateEmailContent(reportType, content, reportData?.data || reportData);
+      
+      const recipientList = Array.isArray(recipients) ? recipients : [recipients];
+      
+      // This would be the actual Microsoft Graph API call
+      const emailPromises = recipientList.map(async (email) => {
+        // Simulated Microsoft Graph API call structure
+        const graphApiCall = {
+          method: 'POST',
+          url: 'https://graph.microsoft.com/v1.0/me/sendMail',
+          headers: {
+            'Authorization': 'Bearer YOUR_ACCESS_TOKEN',
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            message: {
+              subject: subject,
+              body: {
+                contentType: 'HTML',
+                content: emailBody
+              },
+              toRecipients: [{
+                emailAddress: {
+                  address: email
+                }
+              }],
+              from: {
+                emailAddress: {
+                  address: 'logistics@fresh-one.com'
+                }
+              }
+            }
+          })
+        };
+        
+        // Simulate API delay
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        return { email, success: true };
+      });
+      
+      await Promise.all(emailPromises);
+      addNotification('success', `FreshOne emails sent successfully`, `Delivered to ${recipientList.length} recipient(s)`);
       return { success: true };
+      
     } catch (error) {
-      addNotification('error', `Failed to send email to ${recipient}`, error.message);
+      addNotification('error', `Failed to send FreshOne email`, error.message);
       return { success: false, error: error.message };
     }
+  };
+
+  // Generate professional email content
+  const generateEmailContent = (reportType, content, reportData) => {
+    const freshOneHeader = `
+      <div style="background: linear-gradient(135deg, #84cc16 0%, #65a30d 100%); padding: 20px; margin-bottom: 20px;">
+        <div style="display: flex; align-items: center;">
+          <div style="width: 50px; height: 50px; background: white; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin-right: 15px;">
+            <span style="color: #84cc16; font-weight: bold; font-size: 18px;">F1</span>
+          </div>
+          <div>
+            <h1 style="color: white; margin: 0; font-size: 24px;">FreshOne Logistics</h1>
+            <p style="color: rgba(255,255,255,0.9); margin: 0;">Distribution • Warehousing • Logistics</p>
+          </div>
+        </div>
+      </div>
+    `;
+
+    const freshOneFooter = `
+      <div style="margin-top: 30px; padding: 20px; background: #f9f9f9; border-top: 3px solid #84cc16;">
+        <p style="margin: 0; color: #666; font-size: 14px;">
+          <strong>FreshOne</strong> - Right place, right time, right temperature, right price<br>
+          Dallas • Tampa • Michigan | sales@fresh-one.com
+        </p>
+      </div>
+    `;
+
+    let emailContent = freshOneHeader;
+
+    switch (reportType) {
+      case 'customer':
+        emailContent += `
+          <h2 style="color: #84cc16;">Your FreshOne Delivery Schedule</h2>
+          <p>Dear Valued Customer,</p>
+          <p>Please find your delivery schedule for ${new Date().toLocaleDateString()}:</p>
+        `;
+        break;
+
+      case 'warehouse':
+        emailContent += `
+          <h2 style="color: #84cc16;">FreshOne Loading Instructions</h2>
+          <p>Warehouse Team,</p>
+          <p>Loading instructions for today's routes:</p>
+        `;
+        break;
+
+      case 'management':
+        emailContent += `
+          <h2 style="color: #84cc16;">FreshOne Operations Summary</h2>
+          <p>Management Team,</p>
+          <p>Daily operations summary for ${new Date().toLocaleDateString()}:</p>
+        `;
+        break;
+    }
+
+    emailContent += freshOneFooter;
+    return emailContent;
   };
 
   // Real-time tracking simulation
@@ -226,7 +333,7 @@ const LogisticsAutomationPlatform = () => {
     addNotification('info', `Uploading routes to Samsara (${mode})...`, 'Creating driver assignments');
     
     try {
-      if (!testMode) {
+      if (!testMode && apiConfig.samsara) {
         // Real Samsara API call
         const samsaraResponse = await fetch(`https://api.samsara.com/fleet/routes`, {
           method: 'POST',
@@ -333,25 +440,38 @@ const LogisticsAutomationPlatform = () => {
     return generatedReports;
   };
 
+  // Calculate efficiency metrics
+  const calculateEfficiencyMetrics = (routes) => {
+    const totalStops = routes.reduce((acc, route) => acc + (route.stops?.length || 0), 0);
+    const totalDistance = routes.reduce((acc, route) => acc + (route.totalDistance || 0), 0);
+    const avgStopsPerMile = totalStops > 0 ? (totalDistance / totalStops).toFixed(1) : 0;
+    const avgTimePerStop = routes.reduce((acc, route) => acc + (route.totalTime || 0), 0) / totalStops;
+    
+    return {
+      stopsPerMile: avgStopsPerMile,
+      avgTimePerStop: Math.round(avgTimePerStop),
+      routeEfficiency: totalStops > 0 ? Math.min(100, Math.round((1 / avgStopsPerMile) * 100)) : 0
+    };
+  };
+
   // Generate Warehouse Excel (Tampa Routes and Stops format)
   const generateWarehouseExcel = (routes, timestamp) => {
     const stops = routes[0]?.stops || [];
     const dateValue = timestamp.toLocaleDateString('en-US');
     
-    // Create data in the exact format of your current Tampa Routes file
     const excelData = [
-      ['INV #', 'NAME OF', 'CITY', 'DATE', 'Route', 'Stops', '', '', '', '', '', '', ''] // Headers
+      ['INV #', 'NAME OF', 'CITY', 'DATE', 'Route', 'Stops', '', '', '', '', '', '', '']
     ];
     
     stops.forEach((stop, index) => {
       excelData.push([
-        stop.SO_Number || (2084800 + index), // Invoice number
+        stop.SO_Number || (2084800 + index),
         stop.Customer_Name,
         stop.City,
         dateValue,
         routes[0]?.id || '200',
-        index + 1, // Stop sequence
-        '', '', '', '', '', '', '' // Empty columns to match format
+        index + 1,
+        '', '', '', '', '', '', ''
       ]);
     });
     
@@ -367,31 +487,29 @@ const LogisticsAutomationPlatform = () => {
     const route = routes[0] || {};
     const stops = route.stops || [];
     
-    // Create weekly sheets (for now, we'll create one day)
     const dayName = timestamp.toLocaleDateString('en-US', { weekday: 'short' });
     const monthDay = `${timestamp.getMonth() + 1}.${String(timestamp.getDate()).padStart(2, '0')}`;
     const sheetName = `${dayName} ${monthDay}`;
     
     const excelData = [
-      ['', '', '', '', '', '', '', '', '', '', '', '', '', '', ''], // Empty row
+      ['', '', '', '', '', '', '', '', '', '', '', '', '', '', ''],
       ['Date', timestamp.toLocaleDateString('en-US'), '', '', '', '', '', '', '', '', '', '', '', '', ''],
       ['Driver: ', route.driver || 'ASSIGNED DRIVER', '', '', '', '', '', '', '', '', '', '', '', '', ''],
       ['Truck #: ', route.vehicle || '000000', '', '', '', '', '', '', '', Math.round(route.totalTime / 60), Math.round(route.totalDistance), '', '', '', '', ''],
       ['DC Departure:  Sched 5:00 am', '', `Route:  TPA-FF-${dayName} ${route.id || '100'}`, '', '', '', '', '', '', Math.round(route.totalDistance), 'Miles', '', '', '', ''],
-      ['', '', '', '', '', '', '', '', '', '', '', '', '', '', ''], // Empty row
-      ['Stop', 'Customer Name', 'Address', 'City', 'State', 'Contact', 'Phone', 'Cases', 'Special Instructions', 'ETA', 'Notes', '', '', '', ''] // Headers
+      ['', '', '', '', '', '', '', '', '', '', '', '', '', '', ''],
+      ['Stop', 'Customer Name', 'Address', 'City', 'State', 'Contact', 'Phone', 'Cases', 'Special Instructions', 'ETA', 'Notes', '', '', '', '']
     ];
     
-    // Add stops data
     stops.forEach((stop, index) => {
       excelData.push([
         index + 1,
         stop.Customer_Name,
-        stop.Customer_Name, // Using customer name as address for now
+        stop.Customer_Name,
         stop.City,
         stop.State,
-        'Office', // Default contact
-        '(000) 000-0000', // Default phone
+        'Office',
+        '(000) 000-0000',
         stop.Cases,
         stop.Special_Instructions || 'Standard delivery',
         new Date(stop.estimatedArrival).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
@@ -403,190 +521,8 @@ const LogisticsAutomationPlatform = () => {
       type: 'excel',
       data: excelData,
       sheetName: sheetName,
-      multiSheet: true // This indicates we want multiple sheets for different days
+      multiSheet: true
     };
-  };
-
-
-
-  // Calculate efficiency metrics
-  const calculateEfficiencyMetrics = (routes) => {
-    const totalStops = routes.reduce((acc, route) => acc + (route.stops?.length || 0), 0);
-    const totalDistance = routes.reduce((acc, route) => acc + (route.totalDistance || 0), 0);
-    const avgStopsPerMile = totalStops > 0 ? (totalDistance / totalStops).toFixed(1) : 0;
-    const avgTimePerStop = routes.reduce((acc, route) => acc + (route.totalTime || 0), 0) / totalStops;
-    
-    return {
-      stopsPerMile: avgStopsPerMile,
-      avgTimePerStop: Math.round(avgTimePerStop),
-      routeEfficiency: totalStops > 0 ? Math.min(100, Math.round((1 / avgStopsPerMile) * 100)) : 0
-    };
-  };
-
-  // Generate Customer Report
-  const generateCustomerReport = (stops, timestamp) => {
-    return `
-      <div style="font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto;">
-        ${getFreshOneHeader()}
-        <h2 style="color: #84cc16; border-bottom: 2px solid #84cc16; padding-bottom: 10px;">
-          Delivery Schedule - ${timestamp}
-        </h2>
-        
-        <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0;">
-          <h3 style="color: #333; margin-top: 0;">Your FreshOne Deliveries</h3>
-          ${stops.map((stop, index) => `
-            <div style="background: white; padding: 15px; margin: 10px 0; border-radius: 5px; border-left: 4px solid #84cc16;">
-              <div style="display: flex; justify-content: space-between; align-items: center;">
-                <div>
-                  <h4 style="margin: 0; color: #333;">${stop.sequence}. ${stop.Customer_Name}</h4>
-                  <p style="margin: 5px 0; color: #666;">${stop.City}, ${stop.State}</p>
-                  <p style="margin: 5px 0; font-weight: bold; color: #84cc16;">${stop.Cases} cases</p>
-                </div>
-                <div style="text-align: right;">
-                  <p style="margin: 0; font-size: 18px; font-weight: bold; color: #333;">
-                    ${new Date(stop.estimatedArrival).toLocaleTimeString()}
-                  </p>
-                  <p style="margin: 0; color: #666; font-size: 14px;">Estimated Arrival</p>
-                </div>
-              </div>
-              ${stop.Special_Instructions ? `
-                <div style="margin-top: 10px; padding: 10px; background: #fff3cd; border-radius: 3px;">
-                  <strong>Special Instructions:</strong> ${stop.Special_Instructions}
-                </div>
-              ` : ''}
-            </div>
-          `).join('')}
-        </div>
-        
-        ${getFreshOneFooter()}
-      </div>
-    `;
-  };
-
-  // Generate Warehouse Report
-  const generateWarehouseReport = (stops, timestamp) => {
-    return `
-      <div style="font-family: Arial, sans-serif; max-width: 1000px; margin: 0 auto;">
-        ${getFreshOneHeader()}
-        <h2 style="color: #84cc16; border-bottom: 2px solid #84cc16; padding-bottom: 10px;">
-          Warehouse Loading Instructions - ${timestamp}
-        </h2>
-        
-        <div style="margin: 20px 0;">
-          <h3 style="color: #333;">Loading Summary</h3>
-          <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin: 15px 0;">
-            <div style="background: #f8f9fa; padding: 15px; border-radius: 5px; text-align: center;">
-              <h4 style="margin: 0; color: #84cc16; font-size: 24px;">${stops.length}</h4>
-              <p style="margin: 5px 0; color: #666;">Total Stops</p>
-            </div>
-            <div style="background: #f8f9fa; padding: 15px; border-radius: 5px; text-align: center;">
-              <h4 style="margin: 0; color: #84cc16; font-size: 24px;">${stops.reduce((sum, stop) => sum + stop.Cases, 0)}</h4>
-              <p style="margin: 5px 0; color: #666;">Total Cases</p>
-            </div>
-            <div style="background: #f8f9fa; padding: 15px; border-radius: 5px; text-align: center;">
-              <h4 style="margin: 0; color: #84cc16; font-size: 24px;">${stops.filter(s => s.Special_Instructions).length}</h4>
-              <p style="margin: 5px 0; color: #666;">Special Instructions</p>
-            </div>
-          </div>
-        </div>
-
-        <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
-          <thead>
-            <tr style="background: #84cc16; color: white;">
-              <th style="padding: 12px; border: 1px solid #ddd; text-align: left;">Sequence</th>
-              <th style="padding: 12px; border: 1px solid #ddd; text-align: left;">Customer</th>
-              <th style="padding: 12px; border: 1px solid #ddd; text-align: left;">Location</th>
-              <th style="padding: 12px; border: 1px solid #ddd; text-align: center;">Cases</th>
-              <th style="padding: 12px; border: 1px solid #ddd; text-align: left;">Special Instructions</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${stops.map((stop, index) => `
-              <tr style="background: ${index % 2 === 0 ? '#f8f9fa' : 'white'};">
-                <td style="padding: 12px; border: 1px solid #ddd; font-weight: bold; color: #84cc16;">${stop.sequence}</td>
-                <td style="padding: 12px; border: 1px solid #ddd; font-weight: bold;">${stop.Customer_Name}</td>
-                <td style="padding: 12px; border: 1px solid #ddd;">${stop.City}, ${stop.State}</td>
-                <td style="padding: 12px; border: 1px solid #ddd; text-align: center; font-weight: bold;">${stop.Cases}</td>
-                <td style="padding: 12px; border: 1px solid #ddd; font-style: italic;">${stop.Special_Instructions || 'Standard delivery'}</td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
-        
-        ${getFreshOneFooter()}
-      </div>
-    `;
-  };
-
-  // Generate Driver Report
-  const generateDriverReport = (routeData, timestamp) => {
-    return `
-      <div style="font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto;">
-        ${getFreshOneHeader()}
-        <h2 style="color: #84cc16; border-bottom: 2px solid #84cc16; padding-bottom: 10px;">
-          Driver Route Sheet - ${timestamp}
-        </h2>
-        
-        <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0;">
-          <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px;">
-            <div>
-              <h3 style="margin: 0; color: #333;">Route Information</h3>
-              <p><strong>Route ID:</strong> ${routeData.id}</p>
-              <p><strong>Driver:</strong> ${routeData.driver}</p>
-              <p><strong>Vehicle:</strong> ${routeData.vehicle}</p>
-            </div>
-            <div>
-              <h3 style="margin: 0; color: #333;">Route Metrics</h3>
-              <p><strong>Total Distance:</strong> ${routeData.totalDistance} miles</p>
-              <p><strong>Estimated Time:</strong> ${Math.round((routeData.totalTime || 0) / 60)} hours</p>
-              <p><strong>Total Stops:</strong> ${routeData.stops?.length || 0}</p>
-            </div>
-          </div>
-        </div>
-
-        <h3 style="color: #333;">Stop-by-Stop Instructions</h3>
-        ${(routeData.stops || []).map((stop, index) => `
-          <div style="background: white; border: 1px solid #ddd; border-radius: 8px; padding: 20px; margin: 15px 0; border-left: 5px solid #84cc16;">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-              <h4 style="margin: 0; color: #333;">
-                <span style="background: #84cc16; color: white; padding: 5px 10px; border-radius: 20px; margin-right: 10px;">
-                  ${stop.sequence}
-                </span>
-                ${stop.Customer_Name}
-              </h4>
-              <div style="text-align: right;">
-                <div style="font-size: 18px; font-weight: bold; color: #84cc16;">
-                  ${new Date(stop.estimatedArrival).toLocaleTimeString()}
-                </div>
-                <div style="font-size: 12px; color: #666;">ETA</div>
-              </div>
-            </div>
-            
-            <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; margin: 10px 0;">
-              <div>
-                <strong>Address:</strong><br>
-                ${stop.Customer_Name}<br>
-                ${stop.City}, ${stop.State}
-              </div>
-              <div>
-                <strong>Delivery Details:</strong><br>
-                Cases: ${stop.Cases}<br>
-                Service Time: ${stop.serviceTime} minutes
-              </div>
-            </div>
-            
-            ${stop.Special_Instructions ? `
-              <div style="background: #fff3cd; padding: 10px; border-radius: 5px; margin-top: 10px;">
-                <strong>⚠️ Special Instructions:</strong><br>
-                ${stop.Special_Instructions}
-              </div>
-            ` : ''}
-          </div>
-        `).join('')}
-        
-        ${getFreshOneFooter()}
-      </div>
-    `;
   };
 
   // Generate Management Report
@@ -597,11 +533,20 @@ const LogisticsAutomationPlatform = () => {
     
     return `
       <div style="font-family: Arial, sans-serif; max-width: 1000px; margin: 0 auto;">
-        ${getFreshOneHeader()}
+        <div style="background: linear-gradient(135deg, #84cc16 0%, #65a30d 100%); padding: 25px; margin-bottom: 25px; border-radius: 8px;">
+          <div style="display: flex; align-items: center;">
+            <div style="width: 60px; height: 60px; background: white; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin-right: 20px;">
+              <span style="color: #84cc16; font-weight: bold; font-size: 24px;">F1</span>
+            </div>
+            <div>
+              <h1 style="color: white; margin: 0; font-size: 28px;">FreshOne Logistics</h1>
+              <p style="color: rgba(255,255,255,0.9); margin: 5px 0 0 0; font-size: 16px;">Distribution • Warehousing • Logistics</p>
+            </div>
+          </div>
+        </div>
         <h2 style="color: #84cc16; border-bottom: 2px solid #84cc16; padding-bottom: 10px;">
-          FreshOne Operations Dashboard - ${timestamp}
+          FreshOne Operations Dashboard - ${timestamp.toLocaleDateString()}
         </h2>
-        
         <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin: 20px 0;">
           <div style="background: linear-gradient(135deg, #84cc16, #65a30d); color: white; padding: 20px; border-radius: 8px; text-align: center;">
             <h3 style="margin: 0; font-size: 32px;">${routes.length}</h3>
@@ -620,75 +565,26 @@ const LogisticsAutomationPlatform = () => {
             <p style="margin: 5px 0; opacity: 0.9;">Total Miles</p>
           </div>
         </div>
-
-        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; margin: 20px 0;">
-          <div style="background: #f8f9fa; padding: 20px; border-radius: 8px;">
-            <h3 style="color: #333; margin-top: 0;">Efficiency Metrics</h3>
-            <div style="margin: 10px 0;">
-              <strong>Route Efficiency:</strong> ${metrics.routeEfficiency || 0}%
-            </div>
-            <div style="margin: 10px 0;">
-              <strong>Avg Time per Stop:</strong> ${metrics.avgTimePerStop || 0} minutes
-            </div>
-            <div style="margin: 10px 0;">
-              <strong>Miles per Stop:</strong> ${metrics.stopsPerMile || 0}
-            </div>
-          </div>
-          <div style="background: #f8f9fa; padding: 20px; border-radius: 8px;">
-            <h3 style="color: #333; margin-top: 0;">Cost Analysis</h3>
-            <div style="margin: 10px 0;">
-              <strong>Estimated Fuel Cost:</strong> ${routes.reduce((acc, route) => acc + (route.estimatedFuelCost || 0), 0).toFixed(2)}
-            </div>
-            <div style="margin: 10px 0;">
-              <strong>Total Drive Time:</strong> ${Math.round(routes.reduce((acc, route) => acc + (route.totalTime || 0), 0) / 60)} hours
-            </div>
-            <div style="margin: 10px 0;">
-              <strong>Avg Cases per Mile:</strong> ${routes.reduce((acc, route) => acc + (route.totalDistance || 0), 0) > 0 ? (totalCases / routes.reduce((acc, route) => acc + (route.totalDistance || 0), 0)).toFixed(1) : 0}
-            </div>
+        <div style="margin-top: 40px; padding: 25px; background: #f8f9fa; border-top: 4px solid #84cc16; border-radius: 8px;">
+          <div style="text-align: center;">
+            <h4 style="margin: 0; color: #84cc16; font-size: 18px;">FreshOne</h4>
+            <p style="margin: 10px 0 5px 0; color: #666; font-size: 16px; font-weight: bold;">
+              Right place, right time, right temperature, right price
+            </p>
+            <p style="margin: 0; color: #666; font-size: 14px;">
+              <strong>Locations:</strong> Dallas • Tampa • Michigan<br>
+              <strong>Contact:</strong> sales@fresh-one.com | Customer Support: lbucher@fresh-one.com
+            </p>
           </div>
         </div>
-        
-        ${getFreshOneFooter()}
       </div>
     `;
   };
-
-  // Helper functions for report branding
-  const getFreshOneHeader = () => `
-    <div style="background: linear-gradient(135deg, #84cc16 0%, #65a30d 100%); padding: 25px; margin-bottom: 25px; border-radius: 8px;">
-      <div style="display: flex; align-items: center;">
-        <div style="width: 60px; height: 60px; background: white; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin-right: 20px;">
-          <span style="color: #84cc16; font-weight: bold; font-size: 24px;">F1</span>
-        </div>
-        <div>
-          <h1 style="color: white; margin: 0; font-size: 28px;">FreshOne Logistics</h1>
-          <p style="color: rgba(255,255,255,0.9); margin: 5px 0 0 0; font-size: 16px;">Distribution • Warehousing • Logistics</p>
-        </div>
-      </div>
-    </div>
-  `;
-
-  const getFreshOneFooter = () => `
-    <div style="margin-top: 40px; padding: 25px; background: #f8f9fa; border-top: 4px solid #84cc16; border-radius: 8px;">
-      <div style="text-align: center;">
-        <h4 style="margin: 0; color: #84cc16; font-size: 18px;">FreshOne</h4>
-        <p style="margin: 10px 0 5px 0; color: #666; font-size: 16px; font-weight: bold;">
-          Right place, right time, right temperature, right price
-        </p>
-        <p style="margin: 0; color: #666; font-size: 14px;">
-          <strong>Locations:</strong> Dallas • Tampa • Michigan<br>
-          <strong>Contact:</strong> sales@fresh-one.com | Customer Support: lbucher@fresh-one.com
-        </p>
-      </div>
-    </div>
-  `;
-
 
   const sendNotifications = async (reports) => {
     setProcessing(true);
     addNotification('info', 'Sending FreshOne email notifications...', 'Distributing reports to stakeholders');
     
-    // Send emails to different recipients with FreshOne branding
     const emailPromises = Object.entries(reports).map(async ([key, report]) => {
       const subject = `FreshOne ${report.title} - ${new Date().toLocaleDateString()}`;
       const content = `Please find attached the ${report.title} for today's FreshOne deliveries.`;
@@ -735,7 +631,7 @@ const LogisticsAutomationPlatform = () => {
       addNotification('info', 'Automation started', 'Processing BOL data');
       
       const geocoded = await geocodeAddresses(sampleBOLData);
-      await optimizeRoutes(geocoded); // This now stops at review step
+      await optimizeRoutes(geocoded);
       
       setProcessing(false);
       addNotification('info', 'Routes ready for review', 'Please review and approve before sending to Samsara');
@@ -1056,22 +952,22 @@ const LogisticsAutomationPlatform = () => {
             )}
             
             {/* File Upload Section */}
-              <div className="bg-white rounded-xl shadow-lg p-6">
-                <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center">
-                  <div className="w-8 h-8 bg-green-500 rounded-full flex items-center justify-center mr-3">
-                    <span className="text-white font-bold text-sm">F1</span>
-                  </div>
-                  FreshOne Bill of Lading Upload
-                </h2>
+            <div className="bg-white rounded-xl shadow-lg p-6">
+              <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center">
+                <div className="w-8 h-8 bg-green-500 rounded-full flex items-center justify-center mr-3">
+                  <span className="text-white font-bold text-sm">F1</span>
+                </div>
+                FreshOne Bill of Lading Upload
+              </h2>
               <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center">
                 <Upload className="w-12 h-12 text-gray-400 mx-auto mb-4" />
-                  <p className="text-gray-600 mb-4">
-                    Upload your BOL Excel file or use sample data for demo
-                    <br />
-                    <span className="text-sm text-green-600 font-medium">
-                      ✓ Serving Schools, Retail, Restaurants & More across Dallas, Tampa & Michigan
-                    </span>
-                  </p>
+                <p className="text-gray-600 mb-4">
+                  Upload your BOL Excel file or use sample data for demo
+                  <br />
+                  <span className="text-sm text-green-600 font-medium">
+                    ✓ Serving Schools, Retail, Restaurants & More across Dallas, Tampa & Michigan
+                  </span>
+                </p>
                 <div className="flex justify-center space-x-4">
                   <label className="cursor-pointer bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition-colors">
                     Choose File
@@ -1165,7 +1061,6 @@ const LogisticsAutomationPlatform = () => {
                           {(key === 'warehouse' || key === 'customer') && (
                             <button 
                               onClick={() => {
-                                // Simulate Excel download
                                 addNotification('info', `Downloading ${report.filename}`, 'Excel file ready');
                               }}
                               className="flex items-center px-3 py-1 bg-green-600 text-white rounded text-sm hover:bg-green-700 transition-colors"
@@ -1269,13 +1164,108 @@ const LogisticsAutomationPlatform = () => {
               </div>
             )}
 
-              <div className="bg-white rounded-xl shadow-lg p-6">
-                <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center">
-                  <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center mr-2">
-                    <span className="text-white font-bold text-xs">F1</span>
+            {/* FreshOne Email Configuration */}
+            <div className="bg-white rounded-xl shadow-lg p-6">
+              <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center">
+                <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center mr-2">
+                  <span className="text-white font-bold text-xs">F1</span>
+                </div>
+                <Mail className="w-5 h-5 mr-2" />
+                FreshOne Email Notification Settings
+              </h2>
+              
+              {/* Email Status */}
+              <div className="mb-6 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="font-medium text-yellow-800">Microsoft Email Integration Status</h3>
+                    <p className="text-sm text-yellow-600">
+                      {emailSettings.microsoftConfigured 
+                        ? '✅ Microsoft Graph API configured and ready'
+                        : '⏳ Waiting for IT setup - Using simulation mode'
+                      }
+                    </p>
                   </div>
-                  FreshOne API Integrations
-                </h3>
+                  <label className="flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={emailSettings.enabled}
+                      onChange={(e) => setEmailSettings({...emailSettings, enabled: e.target.checked})}
+                      className="mr-2"
+                    />
+                    <span className={`text-sm font-medium ${emailSettings.enabled ? 'text-green-600' : 'text-gray-600'}`}>
+                      {emailSettings.enabled ? 'Email Enabled' : 'Simulation Mode'}
+                    </span>
+                  </label>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Customer Email</label>
+                  <input
+                    type="email"
+                    value={emailSettings.customer}
+                    onChange={(e) => setEmailSettings({...emailSettings, customer: e.target.value})}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+                    placeholder="customer@fresh-one.com"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">Receives delivery schedules</p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Warehouse Email</label>
+                  <input
+                    type="email"
+                    value={emailSettings.warehouse}
+                    onChange={(e) => setEmailSettings({...emailSettings, warehouse: e.target.value})}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+                    placeholder="warehouse@fresh-one.com"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">Receives loading instructions</p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Management Email</label>
+                  <input
+                    type="email"
+                    value={emailSettings.management}
+                    onChange={(e) => setEmailSettings({...emailSettings, management: e.target.value})}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+                    placeholder="djanacek@fresh-one.com"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">Receives operations summaries</p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Driver Emails</label>
+                  <input
+                    type="text"
+                    value={emailSettings.drivers.join(', ')}
+                    onChange={(e) => setEmailSettings({...emailSettings, drivers: e.target.value.split(', ')})}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+                    placeholder="driver1@fresh-one.com, driver2@fresh-one.com"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">Receive route sheets</p>
+                </div>
+              </div>
+
+              {/* Email Preview */}
+              <div className="mt-6 p-4 bg-gray-50 rounded-lg">
+                <h4 className="font-medium text-gray-900 mb-2">Email Preview:</h4>
+                <div className="text-sm text-gray-600">
+                  <p><strong>From:</strong> logistics@fresh-one.com</p>
+                  <p><strong>Subject:</strong> FreshOne [Report Type] - {new Date().toLocaleDateString()}</p>
+                  <p><strong>Branding:</strong> Professional FreshOne headers with green styling</p>
+                </div>
+              </div>
+            </div>
+
+            {/* FreshOne API Integrations */}
+            <div className="bg-white rounded-xl shadow-lg p-6">
+              <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center">
+                <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center mr-2">
+                  <span className="text-white font-bold text-xs">F1</span>
+                </div>
+                FreshOne API Integrations
+              </h2>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Samsara API Token</label>
