@@ -43,16 +43,32 @@ const LogisticsAutomationPlatform = () => {
     enabled: false,
     microsoftConfigured: false
   });
-  const [apiConfig, setApiConfig] = useState({
-    nextBillion: '',
-    samsara: '',
-    samsaraOrgId: '1288',
-    emailJS: '',
-    warehouse: { lat: 27.9506, lon: -82.4572, name: 'Main Warehouse' }
+  const [apiConfig, setApiConfig] = useState(() => {
+    // Load saved API config from localStorage
+    const saved = localStorage.getItem('freshone-api-config');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        console.log('Error loading saved API config');
+      }
+    }
+    return {
+      nextBillion: '',
+      samsara: '',
+      samsaraOrgId: '1288',
+      emailJS: '',
+      warehouse: { lat: 27.9506, lon: -82.4572, name: 'Main Warehouse' }
+    };
   });
   const [testMode, setTestMode] = useState(true);
   const [routesAwaitingApproval, setRoutesAwaitingApproval] = useState([]);
   const [showRouteReview, setShowRouteReview] = useState(false);
+
+  // Save API config whenever it changes
+  useEffect(() => {
+    localStorage.setItem('freshone-api-config', JSON.stringify(apiConfig));
+  }, [apiConfig]);
 
   // Workflow steps
   const steps = [
@@ -535,7 +551,7 @@ const LogisticsAutomationPlatform = () => {
       <div style="font-family: Arial, sans-serif; max-width: 1000px; margin: 0 auto;">
         <div style="background: linear-gradient(135deg, #84cc16 0%, #65a30d 100%); padding: 25px; margin-bottom: 25px; border-radius: 8px;">
           <div style="display: flex; align-items: center;">
-            <div style="width: 60px; height: 60px; background: white; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin-right: 20px;">
+            <div style="width: 60px; height: 60px; background: white; border-radius: 50%; display: flex; align-items: center; justify-center: center; margin-right: 20px;">
               <span style="color: #84cc16; font-weight: bold; font-size: 24px;">F1</span>
             </div>
             <div>
@@ -1244,94 +1260,3 @@ const LogisticsAutomationPlatform = () => {
                     placeholder="driver1@fresh-one.com, driver2@fresh-one.com"
                   />
                   <p className="text-xs text-gray-500 mt-1">Receive route sheets</p>
-                </div>
-              </div>
-
-              {/* Email Preview */}
-              <div className="mt-6 p-4 bg-gray-50 rounded-lg">
-                <h4 className="font-medium text-gray-900 mb-2">Email Preview:</h4>
-                <div className="text-sm text-gray-600">
-                  <p><strong>From:</strong> logistics@fresh-one.com</p>
-                  <p><strong>Subject:</strong> FreshOne [Report Type] - {new Date().toLocaleDateString()}</p>
-                  <p><strong>Branding:</strong> Professional FreshOne headers with green styling</p>
-                </div>
-              </div>
-            </div>
-
-            {/* FreshOne API Integrations */}
-            <div className="bg-white rounded-xl shadow-lg p-6">
-              <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center">
-                <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center mr-2">
-                  <span className="text-white font-bold text-xs">F1</span>
-                </div>
-                FreshOne API Integrations
-              </h2>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Samsara API Token</label>
-                  <input
-                    type="password"
-                    value={apiConfig.samsara}
-                    onChange={(e) => setApiConfig({...apiConfig, samsara: e.target.value})}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
-                    placeholder="SAMSARA_TOKEN_HERE"
-                  />
-                  <p className="text-xs text-green-600 mt-1">✓ Token configured</p>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Organization ID</label>
-                  <input
-                    type="text"
-                    value={apiConfig.samsaraOrgId}
-                    onChange={(e) => setApiConfig({...apiConfig, samsaraOrgId: e.target.value})}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
-                    placeholder="1288"
-                  />
-                  <p className="text-xs text-green-600 mt-1">✓ Org ID: 1288</p>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">NextBillion.ai API Key</label>
-                  <input
-                    type="password"
-                    value={apiConfig.nextBillion}
-                    onChange={(e) => setApiConfig({...apiConfig, nextBillion: e.target.value})}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
-                    placeholder="NB_API_KEY_HERE"
-                  />
-                  <p className="text-xs text-gray-500 mt-1">Add when ready</p>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Safety Status</label>
-                  <div className={`px-3 py-2 rounded-md text-sm font-medium ${
-                    testMode ? 'bg-orange-100 text-orange-800' : 'bg-green-100 text-green-800'
-                  }`}>
-                    {testMode ? '🛡️ TEST MODE - Safe for FreshOne testing' : '🔴 LIVE MODE - Will notify FreshOne drivers'}
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Error Display */}
-        {errors.length > 0 && (
-          <div className="mt-6 bg-red-50 border border-red-200 rounded-lg p-4">
-            <div className="flex items-center space-x-3">
-              <AlertCircle className="w-5 h-5 text-red-600" />
-              <div>
-                <h3 className="font-medium text-red-800">Errors Occurred</h3>
-                <ul className="text-sm text-red-600 mt-1">
-                  {errors.map((error, index) => (
-                    <li key={index}>• {error}</li>
-                  ))}
-                </ul>
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-};
-
-export default LogisticsAutomationPlatform;
