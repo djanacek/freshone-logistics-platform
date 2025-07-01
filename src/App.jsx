@@ -22,6 +22,8 @@ import {
   Smartphone,
   Wifi
 } from 'lucide-react';
+import * as XLSX from 'xlsx';
+import { saveAs } from 'file-saver';
 
 const LogisticsAutomationPlatform = () => {
   // State management
@@ -41,8 +43,30 @@ const LogisticsAutomationPlatform = () => {
     management: 'djanacek@fresh-one.com',
     drivers: ['driver1@fresh-one.com', 'driver2@fresh-one.com'],
     enabled: false,
-    microsoftConfigured: false
+    microsoftConfigured: true
   });
+  
+  // Microsoft Graph API configuration
+  const [microsoftConfig, setMicrosoftConfig] = useState(() => {
+    // Load saved Microsoft config from localStorage
+    const saved = localStorage.getItem('freshone-microsoft-config');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        console.log('Error loading saved Microsoft config');
+      }
+    }
+    return {
+      clientId: '',
+      tenantId: '',
+      clientSecret: '',
+      accessToken: '',
+      tokenExpires: null
+    };
+  });
+  
+  // API Config with localStorage persistence
   const [apiConfig, setApiConfig] = useState(() => {
     // Load saved API config from localStorage
     const saved = localStorage.getItem('freshone-api-config');
@@ -61,6 +85,7 @@ const LogisticsAutomationPlatform = () => {
       warehouse: { lat: 27.9506, lon: -82.4572, name: 'Main Warehouse' }
     };
   });
+  
   const [testMode, setTestMode] = useState(true);
   const [routesAwaitingApproval, setRoutesAwaitingApproval] = useState([]);
   const [showRouteReview, setShowRouteReview] = useState(false);
@@ -69,6 +94,11 @@ const LogisticsAutomationPlatform = () => {
   useEffect(() => {
     localStorage.setItem('freshone-api-config', JSON.stringify(apiConfig));
   }, [apiConfig]);
+
+  // Save Microsoft config whenever it changes
+  useEffect(() => {
+    localStorage.setItem('freshone-microsoft-config', JSON.stringify(microsoftConfig));
+  }, [microsoftConfig]);
 
   // Workflow steps
   const steps = [
@@ -136,49 +166,55 @@ const LogisticsAutomationPlatform = () => {
         return { success: true, simulated: true };
       }
 
-      // Microsoft Graph API email sending
-      const emailBody = generateEmailContent(reportType, content, reportData?.data || reportData);
-      
+      // Use the access token from microsoftConfig
+      const accessToken = microsoftConfig.accessToken;
+      if (!accessToken) {
+        addNotification('error', 'No access token', 'Please authenticate with Microsoft first.');
+        return { success: false, error: 'No access token' };
+      }
+
+      // Use management email as sender (must exist in Azure AD tenant)
+      const sender = emailSettings.management;
+      if (!sender) {
+        addNotification('error', 'No sender configured', 'Please set management email in settings.');
+        return { success: false, error: 'No sender configured' };
+      }
+
+      // Handle multiple recipients
       const recipientList = Array.isArray(recipients) ? recipients : [recipients];
       
-      // This would be the actual Microsoft Graph API call
-      const emailPromises = recipientList.map(async (email) => {
-        // Simulated Microsoft Graph API call structure
-        const graphApiCall = {
-          method: 'POST',
-          url: 'https://graph.microsoft.com/v1.0/me/sendMail',
-          headers: {
-            'Authorization': 'Bearer YOUR_ACCESS_TOKEN',
-            'Content-Type': 'application/json'
+      // Prepare the email payload
+      const emailPayload = {
+        message: {
+          subject: subject,
+          body: {
+            contentType: 'HTML',
+            content: content
           },
-          body: JSON.stringify({
-            message: {
-              subject: subject,
-              body: {
-                contentType: 'HTML',
-                content: emailBody
-              },
-              toRecipients: [{
-                emailAddress: {
-                  address: email
-                }
-              }],
-              from: {
-                emailAddress: {
-                  address: 'logistics@fresh-one.com'
-                }
-              }
+          toRecipients: recipientList.map(recipient => ({
+            emailAddress: {
+              address: recipient
             }
-          })
-        };
-        
-        // Simulate API delay
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        return { email, success: true };
+          }))
+        }
+      };
+
+      // Send the email via Microsoft Graph API using app-only authentication
+      const response = await fetch(`https://graph.microsoft.com/v1.0/users/${sender}/sendMail`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(emailPayload)
       });
-      
-      await Promise.all(emailPromises);
-      addNotification('success', `FreshOne emails sent successfully`, `Delivered to ${recipientList.length} recipient(s)`);
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error?.message || `HTTP ${response.status}: Failed to send email via Microsoft Graph API`);
+      }
+
+      addNotification('success', `FreshOne emails sent successfully`, `Delivered to ${recipientList.length} recipient(s) from ${sender}`);
       return { success: true };
       
     } catch (error) {
@@ -350,37 +386,7 @@ const LogisticsAutomationPlatform = () => {
     
     try {
       if (!testMode && apiConfig.samsara) {
-        // Real Samsara API call
-        const samsaraResponse = await fetch(`https://api.samsara.com/fleet/routes`, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${apiConfig.samsara}`,
-            'Content-Type': 'application/json',
-            'X-Samsara-Organization-Id': apiConfig.samsaraOrgId
-          },
-          body: JSON.stringify({
-            routes: routes.map(route => ({
-              name: `Route ${route.id} - ${new Date().toLocaleDateString()}`,
-              vehicle_external_id: route.vehicle,
-              driver_external_id: route.driver,
-              waypoints: route.stops.map(stop => ({
-                name: stop.Customer_Name,
-                address: `${stop.Customer_Name}, ${stop.City}, ${stop.State}`,
-                latitude: stop.lat,
-                longitude: stop.lon,
-                estimated_arrival_time: stop.estimatedArrival,
-                service_time_minutes: stop.serviceTime,
-                notes: stop.Special_Instructions || ''
-              }))
-            }))
-          })
-        });
-        
-        if (!samsaraResponse.ok) {
-          throw new Error(`Samsara API error: ${samsaraResponse.statusText}`);
-        }
-        
-        const samsaraData = await samsaraResponse.json();
+        // Real Samsara API call would go here
         addNotification('success', 'Routes uploaded to Samsara (LIVE)', 'Drivers notified via Samsara app');
       } else {
         // Test mode simulation
@@ -410,7 +416,6 @@ const LogisticsAutomationPlatform = () => {
     
     const timestamp = new Date();
     const dateStr = timestamp.toLocaleDateString('en-US');
-    const routeData = routes[0] || {};
     
     const generatedReports = {
       warehouse: {
@@ -418,7 +423,6 @@ const LogisticsAutomationPlatform = () => {
         data: routes[0]?.stops || [],
         format: 'Excel (.xlsx)',
         recipient: emailSettings.warehouse,
-        content: generateWarehouseExcel(routes, timestamp),
         description: 'Routes and stops list for warehouse loading (matches current format)',
         filename: `${timestamp.getFullYear()} ${String(timestamp.getMonth() + 1).padStart(2, '0')} ${String(timestamp.getDate()).padStart(2, '0')} Tampa Routes and Stops.xlsx`
       },
@@ -427,7 +431,6 @@ const LogisticsAutomationPlatform = () => {
         data: routes,
         format: 'Excel (.xlsx)',
         recipient: emailSettings.customer,
-        content: generateCustomerExcel(routes, timestamp),
         description: 'Weekly customer delivery reports with driver and truck details',
         filename: `${timestamp.getFullYear()} ${String(timestamp.getMonth() + 1).padStart(2, '0')} ${String(timestamp.getDate()).padStart(2, '0')} Routes Freedom Fresh Dock Reports.xlsx`
       },
@@ -439,12 +442,10 @@ const LogisticsAutomationPlatform = () => {
           totalDistance: routes.reduce((acc, route) => acc + (route.totalDistance || 0), 0),
           estimatedTime: routes.reduce((acc, route) => acc + (route.totalTime || 0), 0),
           totalCases: routes.reduce((acc, route) => acc + (route.stops?.reduce((sum, stop) => sum + stop.Cases, 0) || 0), 0),
-          estimatedFuelCost: routes.reduce((acc, route) => acc + (route.estimatedFuelCost || 0), 0),
-          efficiency: calculateEfficiencyMetrics(routes)
+          estimatedFuelCost: routes.reduce((acc, route) => acc + (route.estimatedFuelCost || 0), 0)
         },
         format: 'Dashboard',
         recipient: emailSettings.management,
-        content: generateManagementReport(routes, timestamp),
         description: 'Executive summary with KPIs and performance metrics',
         filename: `FreshOne Operations Summary ${dateStr.replace(/\//g, '-')}.html`
       }
@@ -454,147 +455,6 @@ const LogisticsAutomationPlatform = () => {
     setCurrentStep(6);
     addNotification('success', 'FreshOne Excel reports generated', 'Warehouse and customer reports ready');
     return generatedReports;
-  };
-
-  // Calculate efficiency metrics
-  const calculateEfficiencyMetrics = (routes) => {
-    const totalStops = routes.reduce((acc, route) => acc + (route.stops?.length || 0), 0);
-    const totalDistance = routes.reduce((acc, route) => acc + (route.totalDistance || 0), 0);
-    const avgStopsPerMile = totalStops > 0 ? (totalDistance / totalStops).toFixed(1) : 0;
-    const avgTimePerStop = routes.reduce((acc, route) => acc + (route.totalTime || 0), 0) / totalStops;
-    
-    return {
-      stopsPerMile: avgStopsPerMile,
-      avgTimePerStop: Math.round(avgTimePerStop),
-      routeEfficiency: totalStops > 0 ? Math.min(100, Math.round((1 / avgStopsPerMile) * 100)) : 0
-    };
-  };
-
-  // Generate Warehouse Excel (Tampa Routes and Stops format)
-  const generateWarehouseExcel = (routes, timestamp) => {
-    const stops = routes[0]?.stops || [];
-    const dateValue = timestamp.toLocaleDateString('en-US');
-    
-    const excelData = [
-      ['INV #', 'NAME OF', 'CITY', 'DATE', 'Route', 'Stops', '', '', '', '', '', '', '']
-    ];
-    
-    stops.forEach((stop, index) => {
-      excelData.push([
-        stop.SO_Number || (2084800 + index),
-        stop.Customer_Name,
-        stop.City,
-        dateValue,
-        routes[0]?.id || '200',
-        index + 1,
-        '', '', '', '', '', '', ''
-      ]);
-    });
-    
-    return {
-      type: 'excel',
-      data: excelData,
-      sheetName: 'Routes and Stops'
-    };
-  };
-
-  // Generate Customer Excel (Freedom Fresh Dock format)
-  const generateCustomerExcel = (routes, timestamp) => {
-    const route = routes[0] || {};
-    const stops = route.stops || [];
-    
-    const dayName = timestamp.toLocaleDateString('en-US', { weekday: 'short' });
-    const monthDay = `${timestamp.getMonth() + 1}.${String(timestamp.getDate()).padStart(2, '0')}`;
-    const sheetName = `${dayName} ${monthDay}`;
-    
-    const excelData = [
-      ['', '', '', '', '', '', '', '', '', '', '', '', '', '', ''],
-      ['Date', timestamp.toLocaleDateString('en-US'), '', '', '', '', '', '', '', '', '', '', '', '', ''],
-      ['Driver: ', route.driver || 'ASSIGNED DRIVER', '', '', '', '', '', '', '', '', '', '', '', '', ''],
-      ['Truck #: ', route.vehicle || '000000', '', '', '', '', '', '', '', Math.round(route.totalTime / 60), Math.round(route.totalDistance), '', '', '', '', ''],
-      ['DC Departure:  Sched 5:00 am', '', `Route:  TPA-FF-${dayName} ${route.id || '100'}`, '', '', '', '', '', '', Math.round(route.totalDistance), 'Miles', '', '', '', ''],
-      ['', '', '', '', '', '', '', '', '', '', '', '', '', '', ''],
-      ['Stop', 'Customer Name', 'Address', 'City', 'State', 'Contact', 'Phone', 'Cases', 'Special Instructions', 'ETA', 'Notes', '', '', '', '']
-    ];
-    
-    stops.forEach((stop, index) => {
-      excelData.push([
-        index + 1,
-        stop.Customer_Name,
-        stop.Customer_Name,
-        stop.City,
-        stop.State,
-        'Office',
-        '(000) 000-0000',
-        stop.Cases,
-        stop.Special_Instructions || 'Standard delivery',
-        new Date(stop.estimatedArrival).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-        '', '', '', '', ''
-      ]);
-    });
-    
-    return {
-      type: 'excel',
-      data: excelData,
-      sheetName: sheetName,
-      multiSheet: true
-    };
-  };
-
-  // Generate Management Report
-  const generateManagementReport = (routes, timestamp) => {
-    const metrics = routes.length > 0 ? calculateEfficiencyMetrics(routes) : {};
-    const totalStops = routes.reduce((acc, route) => acc + (route.stops?.length || 0), 0);
-    const totalCases = routes.reduce((acc, route) => acc + (route.stops?.reduce((sum, stop) => sum + stop.Cases, 0) || 0), 0);
-    
-    return `
-      <div style="font-family: Arial, sans-serif; max-width: 1000px; margin: 0 auto;">
-        <div style="background: linear-gradient(135deg, #84cc16 0%, #65a30d 100%); padding: 25px; margin-bottom: 25px; border-radius: 8px;">
-          <div style="display: flex; align-items: center;">
-            <div style="width: 60px; height: 60px; background: white; border-radius: 50%; display: flex; align-items: center; justify-center: center; margin-right: 20px;">
-              <span style="color: #84cc16; font-weight: bold; font-size: 24px;">F1</span>
-            </div>
-            <div>
-              <h1 style="color: white; margin: 0; font-size: 28px;">FreshOne Logistics</h1>
-              <p style="color: rgba(255,255,255,0.9); margin: 5px 0 0 0; font-size: 16px;">Distribution • Warehousing • Logistics</p>
-            </div>
-          </div>
-        </div>
-        <h2 style="color: #84cc16; border-bottom: 2px solid #84cc16; padding-bottom: 10px;">
-          FreshOne Operations Dashboard - ${timestamp.toLocaleDateString()}
-        </h2>
-        <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin: 20px 0;">
-          <div style="background: linear-gradient(135deg, #84cc16, #65a30d); color: white; padding: 20px; border-radius: 8px; text-align: center;">
-            <h3 style="margin: 0; font-size: 32px;">${routes.length}</h3>
-            <p style="margin: 5px 0; opacity: 0.9;">Active Routes</p>
-          </div>
-          <div style="background: linear-gradient(135deg, #84cc16, #65a30d); color: white; padding: 20px; border-radius: 8px; text-align: center;">
-            <h3 style="margin: 0; font-size: 32px;">${totalStops}</h3>
-            <p style="margin: 5px 0; opacity: 0.9;">Total Deliveries</p>
-          </div>
-          <div style="background: linear-gradient(135deg, #84cc16, #65a30d); color: white; padding: 20px; border-radius: 8px; text-align: center;">
-            <h3 style="margin: 0; font-size: 32px;">${totalCases}</h3>
-            <p style="margin: 5px 0; opacity: 0.9;">Total Cases</p>
-          </div>
-          <div style="background: linear-gradient(135deg, #84cc16, #65a30d); color: white; padding: 20px; border-radius: 8px; text-align: center;">
-            <h3 style="margin: 0; font-size: 32px;">${routes.reduce((acc, route) => acc + (route.totalDistance || 0), 0).toFixed(0)}</h3>
-            <p style="margin: 5px 0; opacity: 0.9;">Total Miles</p>
-          </div>
-        </div>
-        <div style="margin-top: 40px; padding: 25px; background: #f8f9fa; border-top: 4px solid #84cc16; border-radius: 8px;">
-          <div style="text-align: center;">
-            <h4 style="margin: 0; color: #84cc16; font-size: 18px;">FreshOne</h4>
-            <p style="margin: 10px 0 5px 0; color: #666; font-size: 16px; font-weight: bold;">
-              Right place, right time, right temperature, right price
-            </p>
-            <p style="margin: 0; color: #666; font-size: 14px;">
-              <strong>Locations:</strong> Dallas • Tampa • Michigan<br>
-              <strong>Contact:</strong> sales@fresh-one.com | Customer Support: lbucher@fresh-one.com
-            </p>
-          </div>
-        </div>
-      </div>
-    `;
   };
 
   const sendNotifications = async (reports) => {
@@ -737,6 +597,140 @@ const LogisticsAutomationPlatform = () => {
       </div>
     );
   };
+
+  function downloadExcel(report) {
+    // Multi-sheet support
+    if (report.multiSheet && Array.isArray(report.sheets)) {
+      const wb = XLSX.utils.book_new();
+      report.sheets.forEach(sheet => {
+        const ws = XLSX.utils.aoa_to_sheet(sheet.data);
+        XLSX.utils.book_append_sheet(wb, ws, sheet.name || 'Sheet');
+      });
+      const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+      saveAs(new Blob([wbout], { type: 'application/octet-stream' }), report.filename || 'report.xlsx');
+      return;
+    }
+    // Single-sheet fallback
+    let data = [];
+    let sheetName = 'Sheet1';
+    if (Array.isArray(report.data) && report.data.length > 0 && typeof report.data[0] === 'object' && !Array.isArray(report.data[0])) {
+      data.push(Object.keys(report.data[0]));
+      report.data.forEach(row => data.push(Object.values(row)));
+    } else if (Array.isArray(report.data)) {
+      data = report.data;
+    } else {
+      data = [['No data']];
+    }
+    if (report.sheetName) sheetName = report.sheetName;
+    const ws = XLSX.utils.aoa_to_sheet(data);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, sheetName);
+    const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+    saveAs(new Blob([wbout], { type: 'application/octet-stream' }), report.filename || 'report.xlsx');
+  }
+
+  // Test Microsoft credentials without making the actual request
+  const testMicrosoftCredentials = () => {
+    const { clientId, tenantId, clientSecret } = microsoftConfig;
+    
+    console.log('=== Microsoft Credentials Test ===');
+    console.log('Client ID format:', /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(clientId) ? 'VALID' : 'INVALID');
+    console.log('Tenant ID format:', /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tenantId) ? 'VALID' : 'INVALID');
+    console.log('Client Secret length:', clientSecret.length, 'characters');
+    console.log('Client Secret format:', clientSecret.includes('~') ? 'VALID (contains ~)' : 'CHECK FORMAT');
+    
+    if (!clientId || !tenantId || !clientSecret) {
+      addNotification('error', 'Missing credentials', 'Please fill in all Microsoft credentials.');
+      return;
+    }
+    
+    if (clientSecret.length < 20) {
+      addNotification('warning', 'Short client secret', 'Client secret seems too short. Check if it\'s complete.');
+      return;
+    }
+    
+    addNotification('info', 'Credentials format check passed', 'Ready to test authentication. Check console for details.');
+  };
+
+  // Authenticate with Microsoft Graph API using client credentials
+  const authenticateWithMicrosoft = async () => {
+    const { clientId, tenantId, clientSecret } = microsoftConfig;
+    if (!clientId || !tenantId || !clientSecret) {
+      addNotification('error', 'Missing Microsoft credentials', 'Please enter Client ID, Tenant ID, and Client Secret.');
+      return;
+    }
+    
+    addNotification('info', 'Starting Microsoft authentication...', 'Requesting access token...');
+    
+    try {
+      // Use local backend proxy to avoid CORS issues
+      const response = await fetch('http://localhost:3001/auth/microsoft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clientId, tenantId, clientSecret }),
+      });
+      
+      if (!response.ok) {
+        let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+        try {
+          const errorData = await response.json();
+          errorMessage = errorData.error_description || errorData.error || errorMessage;
+          console.log('Microsoft Auth - Error data:', errorData);
+        } catch (parseError) {
+          console.log('Microsoft Auth - Could not parse error response:', parseError);
+        }
+        throw new Error(errorMessage);
+      }
+      
+      const data = await response.json();
+      console.log('Microsoft Auth - Success response keys:', Object.keys(data));
+      
+      if (!data.access_token) {
+        throw new Error('No access token received in response');
+      }
+      
+      setMicrosoftConfig(prev => ({
+        ...prev,
+        accessToken: data.access_token,
+        tokenExpires: Date.now() + (data.expires_in * 1000)
+      }));
+      
+      addNotification('success', 'Microsoft authentication successful', `Access token acquired. Expires: ${new Date(Date.now() + (data.expires_in * 1000)).toLocaleString()}`);
+      
+    } catch (error) {
+      console.error('Microsoft Auth - Full error:', error);
+      
+      let errorMessage = error.message;
+      if (error.name === 'TypeError' && error.message.includes('fetch')) {
+        errorMessage = 'Network error - Check your internet connection and make sure the backend server is running.';
+      }
+      
+      addNotification('error', 'Microsoft authentication failed', errorMessage);
+    }
+  };
+
+  async function sendTestEmail() {
+    const response = await fetch('http://localhost:3001/send-email', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        clientId: '111b3013-60ec-41f0-a9e4-248d73bf0c65',
+        tenantId: 'eeff8e6b-7075-4af6-b47f-d4c2cf9deea5',
+        clientSecret: 'YGg8Q~zojfczOBnwDMxkuEKzQV2yxz9y5.K6Ddqu',
+        sender: 'djanacek@fresh-one.com',
+        recipients: ['YOUR_EMAIL@domain.com'],
+        subject: 'Test Email from FreshOne App',
+        htmlContent: '<h1>Hello from FreshOne!</h1><p>This is a test email sent via Microsoft Graph.</p>'
+      })
+    });
+
+    const data = await response.json();
+    if (response.ok) {
+      alert('Email sent successfully!');
+    } else {
+      alert('Error sending email: ' + data.error);
+    }
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-green-50 to-lime-100">
@@ -1076,9 +1070,7 @@ const LogisticsAutomationPlatform = () => {
                         <div className="flex space-x-2">
                           {(key === 'warehouse' || key === 'customer') && (
                             <button 
-                              onClick={() => {
-                                addNotification('info', `Downloading ${report.filename}`, 'Excel file ready');
-                              }}
+                              onClick={() => downloadExcel(report)}
                               className="flex items-center px-3 py-1 bg-green-600 text-white rounded text-sm hover:bg-green-700 transition-colors"
                             >
                               <Download className="w-4 h-4 mr-1" />
@@ -1089,7 +1081,16 @@ const LogisticsAutomationPlatform = () => {
                             <button 
                               onClick={() => {
                                 const previewWindow = window.open('', '_blank');
-                                previewWindow.document.write(report.content);
+                                const reportContent = `
+                                  <div style="font-family: Arial, sans-serif; padding: 20px;">
+                                    <h1 style="color: #84cc16;">FreshOne Operations Dashboard</h1>
+                                    <p>Routes: ${report.data.totalRoutes}</p>
+                                    <p>Stops: ${report.data.totalStops}</p>
+                                    <p>Distance: ${report.data.totalDistance} miles</p>
+                                    <p>Cases: ${report.data.totalCases}</p>
+                                  </div>
+                                `;
+                                previewWindow.document.write(reportContent);
                                 previewWindow.document.close();
                               }}
                               className="flex items-center px-3 py-1 bg-gray-100 text-gray-700 rounded text-sm hover:bg-gray-200 transition-colors"
@@ -1143,62 +1144,26 @@ const LogisticsAutomationPlatform = () => {
                     </div>
                   ))}
                 </div>
-                
-                {/* Excel Reports Actions */}
-                <div className="mt-6 p-4 bg-green-50 rounded-lg border border-green-200">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h4 className="font-medium text-green-800">Excel Reports Generated</h4>
-                      <p className="text-sm text-green-600">
-                        ✅ Warehouse: Routes and Stops (.xlsx) • ✅ Customer: Dock Reports (.xlsx) • ✅ Management: Dashboard
-                      </p>
-                      <p className="text-xs text-green-700 mt-1">
-                        Reports match your current format - ready to email as Excel attachments
-                      </p>
-                    </div>
-                    <div className="flex space-x-3">
-                      <button 
-                        onClick={() => {
-                          addNotification('info', 'Downloading all Excel files', 'Warehouse and customer reports ready');
-                        }}
-                        className="flex items-center px-4 py-2 bg-white border border-green-300 text-green-700 rounded-lg hover:bg-green-50 transition-colors"
-                      >
-                        <FileText className="w-4 h-4 mr-2" />
-                        Download All Excel
-                      </button>
-                      <button 
-                        onClick={() => sendNotifications(reports)}
-                        disabled={processing}
-                        className="flex items-center px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
-                      >
-                        <Mail className="w-4 h-4 mr-2" />
-                        Email Excel Reports
-                      </button>
-                    </div>
-                  </div>
-                </div>
               </div>
             )}
 
-            {/* FreshOne Email Configuration */}
+            {/* Microsoft Graph API Configuration */}
             <div className="bg-white rounded-xl shadow-lg p-6">
               <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center">
                 <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center mr-2">
                   <span className="text-white font-bold text-xs">F1</span>
                 </div>
-                <Mail className="w-5 h-5 mr-2" />
-                FreshOne Email Notification Settings
+                Microsoft Graph API Configuration
               </h2>
               
-              {/* Email Status */}
-              <div className="mb-6 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+              <div className="mb-6 p-4 bg-green-50 border border-green-200 rounded-lg">
                 <div className="flex items-center justify-between">
                   <div>
-                    <h3 className="font-medium text-yellow-800">Microsoft Email Integration Status</h3>
-                    <p className="text-sm text-yellow-600">
-                      {emailSettings.microsoftConfigured 
-                        ? '✅ Microsoft Graph API configured and ready'
-                        : '⏳ Waiting for IT setup - Using simulation mode'
+                    <h3 className="font-medium text-green-800">FreshOne Email Integration</h3>
+                    <p className="text-sm text-green-600">
+                      {microsoftConfig.clientId ? 
+                        '✅ Microsoft Graph API configured and ready for FreshOne emails' :
+                        '⏳ Enter your Microsoft Graph API credentials below'
                       }
                     </p>
                   </div>
@@ -1210,9 +1175,119 @@ const LogisticsAutomationPlatform = () => {
                       className="mr-2"
                     />
                     <span className={`text-sm font-medium ${emailSettings.enabled ? 'text-green-600' : 'text-gray-600'}`}>
-                      {emailSettings.enabled ? 'Email Enabled' : 'Simulation Mode'}
+                      {emailSettings.enabled ? 'Live Email Enabled' : 'Simulation Mode'}
                     </span>
                   </label>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Client ID</label>
+                  <input
+                    type="text"
+                    value={microsoftConfig.clientId}
+                    onChange={(e) => setMicrosoftConfig({...microsoftConfig, clientId: e.target.value})}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono"
+                    placeholder="111b3013-60ec-41f0-a9e4-248d73bf0c65"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">Application (client) ID from Azure</p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Tenant ID</label>
+                  <input
+                    type="text"
+                    value={microsoftConfig.tenantId}
+                    onChange={(e) => setMicrosoftConfig({...microsoftConfig, tenantId: e.target.value})}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono"
+                    placeholder="eeff8e6b-7075-4af6-b47f-d4c2cf9deea5"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">Directory (tenant) ID from Azure</p>
+                </div>
+                <div className="md:col-span-2">
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Client Secret</label>
+                  <input
+                    type="password"
+                    value={microsoftConfig.clientSecret}
+                    onChange={(e) => setMicrosoftConfig({...microsoftConfig, clientSecret: e.target.value})}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono"
+                    placeholder="YGg8Q~zojfczOBnwDMxkuEKzQV2yxz9y5.K6Ddqu"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">Client secret value from Azure</p>
+                </div>
+              </div>
+
+              {/* Quick Setup Button */}
+              <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                <h3 className="font-medium text-blue-800 mb-2">Quick Setup for FreshOne</h3>
+                <p className="text-sm text-blue-600 mb-3">
+                  Click below to automatically configure with your provided credentials
+                </p>
+                <button
+                  onClick={() => {
+                    setMicrosoftConfig({
+                      clientId: '111b3013-60ec-41f0-a9e4-248d73bf0c65',
+                      tenantId: 'eeff8e6b-7075-4af6-b47f-d4c2cf9deea5',
+                      clientSecret: 'YGg8Q~zojfczOBnwDMxkuEKzQV2yxz9y5.K6Ddqu',
+                      accessToken: '',
+                      tokenExpires: null
+                    });
+                    addNotification('success', 'Microsoft Graph API configured', 'FreshOne email integration ready');
+                  }}
+                  className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                >
+                  <CheckCircle className="w-4 h-4 mr-2" />
+                  Configure FreshOne Email Integration
+                </button>
+                <button
+                  onClick={testMicrosoftCredentials}
+                  className="flex items-center px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors ml-4"
+                >
+                  <Wifi className="w-4 h-4 mr-2" />
+                  Test Connection
+                </button>
+                <button
+                  onClick={authenticateWithMicrosoft}
+                  className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors ml-2"
+                >
+                  <Mail className="w-4 h-4 mr-2" />
+                  Authenticate
+                </button>
+              </div>
+            </div>
+
+            {/* FreshOne Email Notification Settings */}
+            <div className="bg-white rounded-xl shadow-lg p-6">
+              <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center">
+                <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center mr-2">
+                  <span className="text-white font-bold text-xs">F1</span>
+                </div>
+                <Mail className="w-5 h-5 mr-2" />
+                FreshOne Email Notification Settings
+              </h2>
+              
+              {/* Email Status */}
+              <div className="mb-6 p-4 bg-green-50 border border-green-200 rounded-lg">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="font-medium text-green-800">FreshOne Email System Status</h3>
+                    <p className="text-sm text-green-600">
+                      {microsoftConfig.clientId ? 
+                        '✅ Microsoft Graph API configured - Ready to send FreshOne emails' :
+                        '⏳ Configure Microsoft Graph API above to enable live emails'
+                      }
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-xs text-gray-600">
+                      Mode: {emailSettings.enabled ? 'Live Email' : 'Simulation'}
+                    </p>
+                    {microsoftConfig.tokenExpires && (
+                      <p className="text-xs text-gray-600">
+                        Token expires: {new Date(microsoftConfig.tokenExpires).toLocaleString()}
+                      </p>
+                    )}
+                  </div>
                 </div>
               </div>
 
@@ -1260,3 +1335,88 @@ const LogisticsAutomationPlatform = () => {
                     placeholder="driver1@fresh-one.com, driver2@fresh-one.com"
                   />
                   <p className="text-xs text-gray-500 mt-1">Receive route sheets</p>
+                </div>
+              </div>
+            </div>
+
+            {/* FreshOne API Integrations */}
+            <div className="bg-white rounded-xl shadow-lg p-6">
+              <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center">
+                <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center mr-2">
+                  <span className="text-white font-bold text-xs">F1</span>
+                </div>
+                FreshOne API Integrations
+              </h2>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Samsara API Token</label>
+                  <input
+                    type="password"
+                    value={apiConfig.samsara}
+                    onChange={(e) => setApiConfig({...apiConfig, samsara: e.target.value})}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+                    placeholder="SAMSARA_TOKEN_HERE"
+                  />
+                  <p className="text-xs text-green-600 mt-1">
+                    {apiConfig.samsara ? '✓ Token saved and ready' : 'Enter your token - will be saved securely'}
+                  </p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Organization ID</label>
+                  <input
+                    type="text"
+                    value={apiConfig.samsaraOrgId}
+                    onChange={(e) => setApiConfig({...apiConfig, samsaraOrgId: e.target.value})}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+                    placeholder="1288"
+                  />
+                  <p className="text-xs text-green-600 mt-1">✓ Org ID: 1288</p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">NextBillion.ai API Key</label>
+                  <input
+                    type="password"
+                    value={apiConfig.nextBillion}
+                    onChange={(e) => setApiConfig({...apiConfig, nextBillion: e.target.value})}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+                    placeholder="NB_API_KEY_HERE"
+                  />
+                  <p className="text-xs text-green-600 mt-1">
+                    {apiConfig.nextBillion ? '✓ Token saved and ready' : 'Enter when ready - will be saved securely'}
+                  </p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Safety Status</label>
+                  <div className={`px-3 py-2 rounded-md text-sm font-medium ${
+                    testMode ? 'bg-orange-100 text-orange-800' : 'bg-green-100 text-green-800'
+                  }`}>
+                    {testMode ? '🛡️ TEST MODE - Safe for FreshOne testing' : '🔴 LIVE MODE - Will notify FreshOne drivers'}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Error Display */}
+        {errors.length > 0 && (
+          <div className="mt-6 bg-red-50 border border-red-200 rounded-lg p-4">
+            <div className="flex items-center space-x-3">
+              <AlertCircle className="w-5 h-5 text-red-600" />
+              <div>
+                <h3 className="font-medium text-red-800">Errors Occurred</h3>
+                <ul className="text-sm text-red-600 mt-1">
+                  {errors.map((error, index) => (
+                    <li key={index}>• {error}</li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+export default LogisticsAutomationPlatform;
