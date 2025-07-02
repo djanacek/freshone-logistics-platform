@@ -25,6 +25,7 @@ import {
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { saveAs } from 'file-saver';
+import { createClient } from '@supabase/supabase-js';
 
 const LogisticsAutomationPlatform = () => {
   // State management
@@ -55,6 +56,13 @@ const LogisticsAutomationPlatform = () => {
   const [showRouteReview, setShowRouteReview] = useState(false);
   // Add modal state for route preview
   const [previewRoute, setPreviewRoute] = useState(null);
+
+  // Add state for file upload progress, errors, and preview
+  const [fileUploadProgress, setFileUploadProgress] = useState('');
+  const [fileUploadError, setFileUploadError] = useState('');
+  const [fileUploadWarnings, setFileUploadWarnings] = useState([]);
+  const [filePreviewData, setFilePreviewData] = useState([]);
+  const [fileReady, setFileReady] = useState(false);
 
   // FreshOne production configuration - no localStorage needed for embedded credentials
 
@@ -369,11 +377,11 @@ const LogisticsAutomationPlatform = () => {
       setErrors([]);
       setNotifications([]);
       
-      setBolData(sampleBOLData);
+      setBolData(getActiveBolData());
       setCurrentStep(1);
       addNotification('info', 'Automation started', 'Processing BOL data');
       
-      const geocoded = await geocodeAddresses(sampleBOLData);
+      const geocoded = await geocodeAddresses(getActiveBolData());
       await optimizeRoutes(geocoded);
       
       setProcessing(false);
@@ -386,13 +394,103 @@ const LogisticsAutomationPlatform = () => {
     }
   };
 
+  // Helper: Normalize column names
+  function normalizeColName(name) {
+    return name
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, '')
+      .replace(/salesorder/, 'sonumber')
+      .replace(/so /, 'sonumber')
+      .replace(/so_/, 'sonumber')
+      .replace(/customername/, 'customer_name')
+      .replace(/deliverydate/, 'delivery_date')
+      .replace(/specialinstructions/, 'special_instructions');
+  }
+
+  // Helper: Map Excel row to BOL row
+  function mapExcelRow(row, colMap) {
+    return {
+      SO_Number: row[colMap.sonumber] || '',
+      Customer_Name: row[colMap.customer_name] || '',
+      City: row[colMap.city] || '',
+      State: row[colMap.state] || '',
+      Cases: row[colMap.cases] || '',
+      Delivery_Date: row[colMap.delivery_date] || '',
+      Special_Instructions: row[colMap.special_instructions] || ''
+    };
+  }
+
+  // Enhanced file upload handler
   const handleFileUpload = (event) => {
+    setFileUploadProgress('Reading file...');
+    setFileUploadError('');
+    setFileUploadWarnings([]);
+    setFilePreviewData([]);
+    setFileReady(false);
     const file = event.target.files[0];
-    if (file) {
-      setBolData(sampleBOLData);
-      setCurrentStep(0);
-      addNotification('info', 'BOL file uploaded', `Processing ${file.name}`);
-    }
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        setFileUploadProgress('Parsing Excel...');
+        const data = new Uint8Array(e.target.result);
+        const workbook = XLSX.read(data, { type: 'array' });
+        const sheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[sheetName];
+        const json = XLSX.utils.sheet_to_json(worksheet, { defval: '' });
+        if (!json.length) throw new Error('No data found in Excel file.');
+        // Normalize columns
+        const colMap = {};
+        const firstRow = json[0];
+        Object.keys(firstRow).forEach(col => {
+          const norm = normalizeColName(col);
+          colMap[norm] = col;
+        });
+        // Required columns
+        const required = ['customer_name', 'city', 'state'];
+        const missing = required.filter(r => !colMap[r]);
+        if (missing.length) {
+          setFileUploadError('Missing required columns: ' + missing.join(', '));
+          setFileUploadProgress('');
+          return;
+        }
+        // Map and validate rows
+        const previewRows = [];
+        const warnings = [];
+        json.forEach((row, idx) => {
+          const mapped = mapExcelRow(row, colMap);
+          // Validate
+          if (!mapped.Customer_Name || !mapped.City || !mapped.State) {
+            warnings.push(`Row ${idx + 2}: Missing required data.`);
+          }
+          if (mapped.Cases && isNaN(Number(mapped.Cases))) {
+            warnings.push(`Row ${idx + 2}: Cases is not a number.`);
+          }
+          if (mapped.Delivery_Date && isNaN(Date.parse(mapped.Delivery_Date))) {
+            warnings.push(`Row ${idx + 2}: Invalid delivery date.`);
+          }
+          previewRows.push(mapped);
+        });
+        setFilePreviewData(previewRows);
+        setFileUploadWarnings(warnings);
+        setFileUploadProgress('File parsed successfully.');
+        setFileReady(true);
+      } catch (err) {
+        setFileUploadError('Error parsing file: ' + err.message);
+        setFileUploadProgress('');
+      }
+    };
+    reader.onerror = () => {
+      setFileUploadError('Error reading file.');
+      setFileUploadProgress('');
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  // Use parsed file data if ready, else sample data
+  const getActiveBolData = () => {
+    if (fileReady && filePreviewData.length > 0) return filePreviewData;
+    return sampleBOLData;
   };
 
   // Status indicator component
@@ -535,6 +633,251 @@ const LogisticsAutomationPlatform = () => {
     const nextBillionStatus = NEXTBILLION_API_KEY !== '[YOUR_NEXTBILLION_API_KEY_HERE]' ? '✅ Configured' : '⏳ Not configured';
     
     addNotification('info', `FreshOne API Status (${mode})`, `Samsara: ${samsaraStatus} | NextBillion: ${nextBillionStatus}`);
+  };
+
+  // Supabase config state
+  const [supabaseUrl, setSupabaseUrl] = useState('https://ksikfpcxkpqfqsdhjpnu.supabase.co');
+  const [supabaseKey, setSupabaseKey] = useState('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtzaWtmcGN4a3BxZnFzZGhqcG51Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTEyMzM3NDUsImV4cCI6MjA2NjgwOTc0NX0.y9PfwqsGTEH8DMjQhaur-lSDaPXqI8jD85ntUrm-gzQ');
+  const [supabaseStatus, setSupabaseStatus] = useState('Not Connected');
+  const [supabaseTesting, setSupabaseTesting] = useState(false);
+
+  // Supabase client (recreated on config change)
+  const supabase = createClient(supabaseUrl, supabaseKey);
+
+  // Address management state
+  const [addresses, setAddresses] = useState([]);
+  const [addressUploadProgress, setAddressUploadProgress] = useState('');
+  const [addressUploadError, setAddressUploadError] = useState('');
+  const [addressUploadWarnings, setAddressUploadWarnings] = useState([]);
+  const [addressPreviewData, setAddressPreviewData] = useState([]);
+  const [addressReady, setAddressReady] = useState(false);
+  const [showAddressManager, setShowAddressManager] = useState(false);
+  const [editingAddress, setEditingAddress] = useState(null);
+  const [addressSearchTerm, setAddressSearchTerm] = useState('');
+
+  // Load addresses from Supabase
+  const loadAddresses = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('customer_addresses')
+        .select('*')
+        .order('customer_name', { ascending: true });
+      
+      if (error) throw error;
+      setAddresses(data || []);
+    } catch (error) {
+      addNotification('error', 'Failed to load addresses', error.message);
+    }
+  };
+
+  // Upload address list handler
+  const handleAddressUpload = (event) => {
+    setAddressUploadProgress('Reading address file...');
+    setAddressUploadError('');
+    setAddressUploadWarnings([]);
+    setAddressPreviewData([]);
+    setAddressReady(false);
+    
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        setAddressUploadProgress('Parsing address file...');
+        const data = new Uint8Array(e.target.result);
+        const workbook = XLSX.read(data, { type: 'array' });
+        const sheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[sheetName];
+        const json = XLSX.utils.sheet_to_json(worksheet, { defval: '' });
+        
+        if (!json.length) throw new Error('No data found in address file.');
+        
+        // Normalize address columns
+        const colMap = {};
+        const firstRow = json[0];
+        Object.keys(firstRow).forEach(col => {
+          const norm = col.toLowerCase().replace(/[^a-z0-9]/g, '');
+          colMap[norm] = col;
+        });
+        
+        // Map address data
+        const previewRows = [];
+        const warnings = [];
+        
+        json.forEach((row, idx) => {
+          const address = {
+            customer_name: row[colMap.customername] || row[colMap.customer] || row[colMap.name] || '',
+            full_address: row[colMap.fulladdress] || row[colMap.address] || '',
+            city: row[colMap.city] || '',
+            state: row[colMap.state] || '',
+            zip_code: row[colMap.zipcode] || row[colMap.zip] || '',
+            phone: row[colMap.phone] || row[colMap.telephone] || '',
+            special_instructions: row[colMap.specialinstructions] || row[colMap.instructions] || ''
+          };
+          
+          // Validate required fields
+          if (!address.customer_name || !address.city || !address.state) {
+            warnings.push(`Row ${idx + 2}: Missing required data (customer name, city, or state).`);
+          }
+          
+          previewRows.push(address);
+        });
+        
+        setAddressPreviewData(previewRows);
+        setAddressUploadWarnings(warnings);
+        setAddressUploadProgress('Address file parsed successfully.');
+        setAddressReady(true);
+      } catch (err) {
+        setAddressUploadError('Error parsing address file: ' + err.message);
+        setAddressUploadProgress('');
+      }
+    };
+    
+    reader.onerror = () => {
+      setAddressUploadError('Error reading address file.');
+      setAddressUploadProgress('');
+    };
+    
+    reader.readAsArrayBuffer(file);
+  };
+
+  // Bulk import addresses to Supabase
+  const importAddressesToSupabase = async () => {
+    if (!addressReady || addressPreviewData.length === 0) {
+      addNotification('error', 'No address data ready for import');
+      return;
+    }
+    
+    setAddressUploadProgress('Importing addresses to Supabase...');
+    
+    try {
+      const { data, error } = await supabase
+        .from('customer_addresses')
+        .upsert(addressPreviewData, { 
+          onConflict: 'customer_name,full_address',
+          ignoreDuplicates: false 
+        });
+      
+      if (error) throw error;
+      
+      setAddressUploadProgress('Addresses imported successfully!');
+      addNotification('success', 'Addresses imported to Supabase', `${addressPreviewData.length} addresses processed`);
+      
+      // Reload addresses
+      await loadAddresses();
+      
+      // Reset upload state
+      setAddressPreviewData([]);
+      setAddressReady(false);
+      setAddressUploadProgress('');
+      
+    } catch (error) {
+      setAddressUploadError('Import failed: ' + error.message);
+      addNotification('error', 'Failed to import addresses', error.message);
+    }
+  };
+
+  // Add/Edit address
+  const saveAddress = async (addressData) => {
+    try {
+      if (editingAddress) {
+        // Update existing address
+        const { error } = await supabase
+          .from('customer_addresses')
+          .update(addressData)
+          .eq('id', editingAddress.id);
+        
+        if (error) throw error;
+        addNotification('success', 'Address updated successfully');
+      } else {
+        // Add new address
+        const { error } = await supabase
+          .from('customer_addresses')
+          .insert([addressData]);
+        
+        if (error) throw error;
+        addNotification('success', 'Address added successfully');
+      }
+      
+      setEditingAddress(null);
+      await loadAddresses();
+    } catch (error) {
+      addNotification('error', 'Failed to save address', error.message);
+    }
+  };
+
+  // Delete address
+  const deleteAddress = async (id) => {
+    if (!confirm('Are you sure you want to delete this address?')) return;
+    
+    try {
+      const { error } = await supabase
+        .from('customer_addresses')
+        .delete()
+        .eq('id', id);
+      
+      if (error) throw error;
+      
+      addNotification('success', 'Address deleted successfully');
+      await loadAddresses();
+    } catch (error) {
+      addNotification('error', 'Failed to delete address', error.message);
+    }
+  };
+
+  // Export addresses
+  const exportAddresses = () => {
+    const data = addresses.map(addr => ({
+      'Customer Name': addr.customer_name,
+      'Full Address': addr.full_address,
+      'City': addr.city,
+      'State': addr.state,
+      'Zip Code': addr.zip_code,
+      'Phone': addr.phone,
+      'Special Instructions': addr.special_instructions
+    }));
+    
+    const ws = XLSX.utils.json_to_sheet(data);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Addresses');
+    const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+    
+    const timestamp = new Date().toISOString().split('T')[0];
+    saveAs(new Blob([wbout], { type: 'application/octet-stream' }), `FreshOne_Addresses_${timestamp}.xlsx`);
+    
+    addNotification('success', 'Addresses exported successfully');
+  };
+
+  // Filter addresses for search
+  const filteredAddresses = addresses.filter(addr =>
+    addr.customer_name.toLowerCase().includes(addressSearchTerm.toLowerCase()) ||
+    addr.city.toLowerCase().includes(addressSearchTerm.toLowerCase()) ||
+    addr.state.toLowerCase().includes(addressSearchTerm.toLowerCase())
+  );
+
+  // Load addresses on component mount
+  useEffect(() => {
+    if (supabaseStatus === '✅ Connected') {
+      loadAddresses();
+    }
+  }, [supabaseStatus]);
+
+  // Test Supabase connection
+  const testSupabaseConnection = async () => {
+    setSupabaseTesting(true);
+    setSupabaseStatus('Testing...');
+    try {
+      const { data, error } = await supabase.from('customer_addresses').select('*').limit(1);
+      if (error) {
+        setSupabaseStatus('❌ Error: ' + error.message);
+      } else {
+        setSupabaseStatus('✅ Connected');
+      }
+    } catch (err) {
+      setSupabaseStatus('❌ Error: ' + err.message);
+    }
+    setSupabaseTesting(false);
   };
 
   return (
@@ -858,16 +1201,30 @@ const LogisticsAutomationPlatform = () => {
                     <input type="file" className="hidden" onChange={handleFileUpload} accept=".xlsx,.csv" />
                   </label>
                   <button
-                    onClick={() => setBolData(sampleBOLData)}
+                    onClick={() => {
+                      setBolData(sampleBOLData);
+                      setFilePreviewData([]);
+                      setFileReady(false);
+                      setFileUploadError('');
+                      setFileUploadWarnings([]);
+                      setFileUploadProgress('');
+                    }}
                     className="bg-gray-600 text-white px-4 py-2 rounded-lg hover:bg-gray-700 transition-colors"
                   >
                     Use Sample Data
                   </button>
                 </div>
+                {/* Show file upload progress, errors, and warnings */}
+                {fileUploadProgress && <p className="mt-4 text-green-700 font-medium">{fileUploadProgress}</p>}
+                {fileUploadError && <p className="mt-2 text-red-600 font-medium">{fileUploadError}</p>}
+                {fileUploadWarnings.length > 0 && (
+                  <ul className="mt-2 text-yellow-700 text-sm text-left max-w-xl mx-auto">
+                    {fileUploadWarnings.map((w, i) => <li key={i}>⚠️ {w}</li>)}
+                  </ul>
+                )}
               </div>
-              
               {/* BOL Data Preview */}
-              {bolData.length > 0 && (
+              {(filePreviewData.length > 0 || bolData.length > 0) && (
                 <div className="mt-6">
                   <h3 className="font-medium text-gray-900 mb-3">BOL Data Preview</h3>
                   <div className="overflow-x-auto">
@@ -881,7 +1238,7 @@ const LogisticsAutomationPlatform = () => {
                         </tr>
                       </thead>
                       <tbody className="bg-white divide-y divide-gray-200">
-                        {bolData.map((item, index) => (
+                        {(fileReady ? filePreviewData : bolData).map((item, index) => (
                           <tr key={index}>
                             <td className="px-4 py-3 text-sm text-gray-900">{item.SO_Number}</td>
                             <td className="px-4 py-3 text-sm text-gray-900">{item.Customer_Name}</td>
@@ -1087,52 +1444,300 @@ const LogisticsAutomationPlatform = () => {
               </div>
             </div>
 
-
-
-            {/* FreshOne Production Configuration */}
-            <div className="bg-white rounded-xl shadow-lg p-6">
+            {/* Supabase Config Section */}
+            <div className="bg-white rounded-xl shadow-lg p-6 mt-8">
               <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center">
                 <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center mr-2">
                   <span className="text-white font-bold text-xs">F1</span>
                 </div>
-                FreshOne Production Configuration
+                Supabase Cloud Database Configuration
               </h2>
-              
-              <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-                <h3 className="font-medium text-blue-800 mb-2">Embedded API Credentials</h3>
-                <p className="text-sm text-blue-600 mb-3">
-                  API credentials are embedded in the code for production use. Update the constants at the top of the file to configure.
-                </p>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
-                  <div className="bg-white p-3 rounded border">
-                    <p className="font-medium text-gray-900">Samsara API Token:</p>
-                    <p className="text-gray-600 font-mono text-xs">{SAMSARA_API_TOKEN === '[YOUR_SAMSARA_TOKEN_HERE]' ? 'Not configured' : 'Configured'}</p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Supabase URL</label>
+                  <input
+                    type="text"
+                    value={supabaseUrl}
+                    onChange={e => setSupabaseUrl(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono"
+                    placeholder="https://xyzcompany.supabase.co"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Supabase Anon Key</label>
+                  <input
+                    type="text"
+                    value={supabaseKey}
+                    onChange={e => setSupabaseKey(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono"
+                    placeholder="Your Supabase anon/public key"
+                  />
+                </div>
+              </div>
+              <div className="flex items-center space-x-4">
+                <button
+                  onClick={testSupabaseConnection}
+                  disabled={supabaseTesting}
+                  className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                >
+                  {supabaseTesting ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <Wifi className="w-4 h-4 mr-2" />}
+                  Test Connection
+                </button>
+                <span className="text-sm font-medium">
+                  Status: {supabaseStatus}
+                </span>
+              </div>
+            </div>
+
+            {/* Address Management Section */}
+            <div className="bg-white rounded-xl shadow-lg p-6 mt-8">
+              <div className="flex items-center justify-between mb-6">
+                <h2 className="text-xl font-bold text-gray-900 flex items-center">
+                  <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center mr-2">
+                    <span className="text-white font-bold text-xs">F1</span>
                   </div>
-                  <div className="bg-white p-3 rounded border">
-                    <p className="font-medium text-gray-900">NextBillion API Key:</p>
-                    <p className="text-gray-600 font-mono text-xs">{NEXTBILLION_API_KEY === '[YOUR_NEXTBILLION_API_KEY_HERE]' ? 'Not configured' : 'Configured'}</p>
-                  </div>
+                  FreshOne Address Management
+                </h2>
+                <div className="flex space-x-2">
+                  <button
+                    onClick={() => setShowAddressManager(!showAddressManager)}
+                    className="flex items-center px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
+                  >
+                    <Users className="w-4 h-4 mr-2" />
+                    {showAddressManager ? 'Hide Manager' : 'Open Manager'}
+                  </button>
+                  <button
+                    onClick={exportAddresses}
+                    disabled={addresses.length === 0}
+                    className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400"
+                  >
+                    <Download className="w-4 h-4 mr-2" />
+                    Export All
+                  </button>
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="p-4 bg-gray-50 rounded-lg">
-                  <h4 className="font-medium text-gray-900 mb-2">Safety Status</h4>
-                  <div className={`px-3 py-2 rounded-md text-sm font-medium ${
-                    testMode ? 'bg-orange-100 text-orange-800' : 'bg-green-100 text-green-800'
-                  }`}>
-                    {testMode ? '🛡️ TEST MODE - Safe for FreshOne testing' : '🔴 LIVE MODE - Will notify FreshOne drivers'}
-                  </div>
-                  <p className="text-xs text-gray-600 mt-2">
-                    {testMode ? 'API calls are simulated for safe testing' : 'Real API calls will be made to Samsara'}
+              {/* Address Upload Section */}
+              <div className="mb-6">
+                <h3 className="text-lg font-semibold text-gray-900 mb-4">Bulk Address Upload</h3>
+                <div className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center">
+                  <Upload className="w-12 h-12 text-gray-400 mx-auto mb-4" />
+                  <p className="text-gray-600 mb-4">
+                    Upload Excel/CSV file with customer addresses for bulk import
+                    <br />
+                    <span className="text-sm text-green-600 font-medium">
+                      Required columns: Customer Name, City, State (Full Address, Zip Code, Phone optional)
+                    </span>
                   </p>
-                </div>
-                <div className="p-4 bg-gray-50 rounded-lg">
-                  <h4 className="font-medium text-gray-900 mb-2">Warehouse Location</h4>
-                  <p className="text-sm text-gray-600">{warehouseConfig.name}</p>
-                  <p className="text-xs text-gray-500">Lat: {warehouseConfig.lat}, Lon: {warehouseConfig.lon}</p>
+                  <div className="flex justify-center space-x-4">
+                    <label className="cursor-pointer bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition-colors">
+                      Choose Address File
+                      <input type="file" className="hidden" onChange={handleAddressUpload} accept=".xlsx,.csv" />
+                    </label>
+                  </div>
+                  {addressUploadProgress && <p className="mt-4 text-green-700 font-medium">{addressUploadProgress}</p>}
+                  {addressUploadError && <p className="mt-2 text-red-600 font-medium">{addressUploadError}</p>}
+                  {addressUploadWarnings.length > 0 && (
+                    <ul className="mt-2 text-yellow-700 text-sm text-left max-w-xl mx-auto">
+                      {addressUploadWarnings.map((w, i) => <li key={i}>⚠️ {w}</li>)}
+                    </ul>
+                  )}
+                  {addressReady && addressPreviewData.length > 0 && (
+                    <div className="mt-4">
+                      <p className="text-sm text-gray-600 mb-2">Preview: {addressPreviewData.length} addresses ready to import</p>
+                      <button
+                        onClick={importAddressesToSupabase}
+                        className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors"
+                      >
+                        Import to Supabase
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
+
+              {/* Address Manager */}
+              {showAddressManager && (
+                <div>
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-lg font-semibold text-gray-900">Address Database ({addresses.length} total)</h3>
+                    <div className="flex space-x-2">
+                      <input
+                        type="text"
+                        placeholder="Search addresses..."
+                        value={addressSearchTerm}
+                        onChange={(e) => setAddressSearchTerm(e.target.value)}
+                        className="px-3 py-1 border border-gray-300 rounded-md text-sm"
+                      />
+                      <button
+                        onClick={() => setEditingAddress({})}
+                        className="flex items-center px-3 py-1 bg-green-600 text-white rounded text-sm hover:bg-green-700 transition-colors"
+                      >
+                        <Users className="w-4 h-4 mr-1" />
+                        Add New
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Address List */}
+                  <div className="max-h-96 overflow-y-auto border border-gray-200 rounded-lg">
+                    {filteredAddresses.length === 0 ? (
+                      <div className="p-4 text-center text-gray-500">
+                        {addresses.length === 0 ? 'No addresses in database' : 'No addresses match your search'}
+                      </div>
+                    ) : (
+                      <div className="divide-y divide-gray-200">
+                        {filteredAddresses.map((address) => (
+                          <div key={address.id} className="p-4 hover:bg-gray-50">
+                            <div className="flex items-center justify-between">
+                              <div className="flex-1">
+                                <h4 className="font-medium text-gray-900">{address.customer_name}</h4>
+                                <p className="text-sm text-gray-600">
+                                  {address.full_address && `${address.full_address}, `}
+                                  {address.city}, {address.state} {address.zip_code}
+                                </p>
+                                {address.phone && (
+                                  <p className="text-xs text-gray-500">📞 {address.phone}</p>
+                                )}
+                                {address.special_instructions && (
+                                  <p className="text-xs text-gray-500">📝 {address.special_instructions}</p>
+                                )}
+                              </div>
+                              <div className="flex space-x-2 ml-4">
+                                <button
+                                  onClick={() => setEditingAddress(address)}
+                                  className="px-2 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700 transition-colors"
+                                >
+                                  Edit
+                                </button>
+                                <button
+                                  onClick={() => deleteAddress(address.id)}
+                                  className="px-2 py-1 bg-red-600 text-white rounded text-xs hover:bg-red-700 transition-colors"
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Address Edit Modal */}
+              {editingAddress && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40">
+                  <div className="bg-white rounded-xl shadow-2xl p-6 max-w-md w-full">
+                    <h3 className="text-lg font-bold mb-4">
+                      {editingAddress.id ? 'Edit Address' : 'Add New Address'}
+                    </h3>
+                    <form onSubmit={(e) => {
+                      e.preventDefault();
+                      const formData = new FormData(e.target);
+                      const addressData = {
+                        customer_name: formData.get('customer_name'),
+                        full_address: formData.get('full_address'),
+                        city: formData.get('city'),
+                        state: formData.get('state'),
+                        zip_code: formData.get('zip_code'),
+                        phone: formData.get('phone'),
+                        special_instructions: formData.get('special_instructions')
+                      };
+                      saveAddress(addressData);
+                    }}>
+                      <div className="space-y-4">
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Customer Name *</label>
+                          <input
+                            type="text"
+                            name="customer_name"
+                            defaultValue={editingAddress.customer_name || ''}
+                            required
+                            className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Full Address</label>
+                          <input
+                            type="text"
+                            name="full_address"
+                            defaultValue={editingAddress.full_address || ''}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                          />
+                        </div>
+                        <div className="grid grid-cols-2 gap-4">
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">City *</label>
+                            <input
+                              type="text"
+                              name="city"
+                              defaultValue={editingAddress.city || ''}
+                              required
+                              className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">State *</label>
+                            <input
+                              type="text"
+                              name="state"
+                              defaultValue={editingAddress.state || ''}
+                              required
+                              className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                            />
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-2 gap-4">
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Zip Code</label>
+                            <input
+                              type="text"
+                              name="zip_code"
+                              defaultValue={editingAddress.zip_code || ''}
+                              className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Phone</label>
+                            <input
+                              type="text"
+                              name="phone"
+                              defaultValue={editingAddress.phone || ''}
+                              className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                            />
+                          </div>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Special Instructions</label>
+                          <textarea
+                            name="special_instructions"
+                            defaultValue={editingAddress.special_instructions || ''}
+                            rows="3"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                          />
+                        </div>
+                      </div>
+                      <div className="flex space-x-3 mt-6">
+                        <button
+                          type="submit"
+                          className="flex-1 bg-green-600 text-white py-2 rounded-lg hover:bg-green-700 transition-colors"
+                        >
+                          {editingAddress.id ? 'Update' : 'Add'} Address
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setEditingAddress(null)}
+                          className="flex-1 bg-gray-300 text-gray-700 py-2 rounded-lg hover:bg-gray-400 transition-colors"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </form>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>
