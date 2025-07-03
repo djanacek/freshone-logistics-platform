@@ -21,7 +21,8 @@ import {
   Bell,
   Smartphone,
   Wifi,
-  Copy
+  Copy,
+  Settings
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { saveAs } from 'file-saver';
@@ -635,14 +636,18 @@ const LogisticsAutomationPlatform = () => {
     addNotification('info', `FreshOne API Status (${mode})`, `Samsara: ${samsaraStatus} | NextBillion: ${nextBillionStatus}`);
   };
 
-  // Supabase config state
-  const [supabaseUrl, setSupabaseUrl] = useState('https://ksikfpcxkpqfqsdhjpnu.supabase.co');
-  const [supabaseKey, setSupabaseKey] = useState('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtzaWtmcGN4a3BxZnFzZGhqcG51Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTEyMzM3NDUsImV4cCI6MjA2NjgwOTc0NX0.y9PfwqsGTEH8DMjQhaur-lSDaPXqI8jD85ntUrm-gzQ');
-  const [supabaseStatus, setSupabaseStatus] = useState('Not Connected');
+  // Supabase config state - use environment variables with fallbacks
+  const [supabaseUrl, setSupabaseUrl] = useState(import.meta.env.VITE_SUPABASE_URL || '');
+  const [supabaseKey, setSupabaseKey] = useState(import.meta.env.VITE_SUPABASE_ANON_KEY || '');
+  const [supabaseStatus, setSupabaseStatus] = useState(
+    import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_ANON_KEY 
+      ? 'Not Connected' 
+      : 'Not Configured'
+  );
   const [supabaseTesting, setSupabaseTesting] = useState(false);
 
-  // Supabase client (recreated on config change)
-  const supabase = createClient(supabaseUrl, supabaseKey);
+  // Supabase client (recreated on config change) - only create if credentials are available
+  const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
 
   // Address management state
   const [addresses, setAddresses] = useState([]);
@@ -654,9 +659,15 @@ const LogisticsAutomationPlatform = () => {
   const [showAddressManager, setShowAddressManager] = useState(false);
   const [editingAddress, setEditingAddress] = useState(null);
   const [addressSearchTerm, setAddressSearchTerm] = useState('');
+  const [showSupabaseConfig, setShowSupabaseConfig] = useState(false);
 
   // Load addresses from Supabase
   const loadAddresses = async () => {
+    if (!supabase) {
+      addNotification('error', 'Supabase not configured', 'Please configure Supabase credentials first');
+      return;
+    }
+    
     try {
       const { data, error } = await supabase
         .from('customer_addresses')
@@ -744,6 +755,11 @@ const LogisticsAutomationPlatform = () => {
 
   // Bulk import addresses to Supabase
   const importAddressesToSupabase = async () => {
+    if (!supabase) {
+      addNotification('error', 'Supabase not configured', 'Please configure Supabase credentials first');
+      return;
+    }
+    
     if (!addressReady || addressPreviewData.length === 0) {
       addNotification('error', 'No address data ready for import');
       return;
@@ -780,6 +796,11 @@ const LogisticsAutomationPlatform = () => {
 
   // Add/Edit address
   const saveAddress = async (addressData) => {
+    if (!supabase) {
+      addNotification('error', 'Supabase not configured', 'Please configure Supabase credentials first');
+      return;
+    }
+    
     try {
       if (editingAddress) {
         // Update existing address
@@ -809,6 +830,11 @@ const LogisticsAutomationPlatform = () => {
 
   // Delete address
   const deleteAddress = async (id) => {
+    if (!supabase) {
+      addNotification('error', 'Supabase not configured', 'Please configure Supabase credentials first');
+      return;
+    }
+    
     if (!confirm('Are you sure you want to delete this address?')) return;
     
     try {
@@ -858,24 +884,33 @@ const LogisticsAutomationPlatform = () => {
 
   // Load addresses on component mount
   useEffect(() => {
-    if (supabaseStatus === '✅ Connected') {
+    if (supabaseStatus === '✅ Connected' && supabase) {
       loadAddresses();
     }
-  }, [supabaseStatus]);
+  }, [supabaseStatus, supabase]);
 
   // Test Supabase connection
   const testSupabaseConnection = async () => {
+    if (!supabaseUrl || !supabaseKey) {
+      setSupabaseStatus('❌ Not Configured');
+      addNotification('error', 'Supabase not configured', 'Please configure Supabase credentials first');
+      return;
+    }
+    
     setSupabaseTesting(true);
     setSupabaseStatus('Testing...');
     try {
       const { data, error } = await supabase.from('customer_addresses').select('*').limit(1);
       if (error) {
         setSupabaseStatus('❌ Error: ' + error.message);
+        addNotification('error', 'Supabase connection failed', error.message);
       } else {
         setSupabaseStatus('✅ Connected');
+        addNotification('success', 'Supabase connection successful', 'Database is ready for operations');
       }
     } catch (err) {
       setSupabaseStatus('❌ Error: ' + err.message);
+      addNotification('error', 'Supabase connection failed', err.message);
     }
     setSupabaseTesting(false);
   };
@@ -1452,40 +1487,57 @@ const LogisticsAutomationPlatform = () => {
                 </div>
                 Supabase Cloud Database Configuration
               </h2>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Supabase URL</label>
-                  <input
-                    type="text"
-                    value={supabaseUrl}
-                    onChange={e => setSupabaseUrl(e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono"
-                    placeholder="https://xyzcompany.supabase.co"
-                  />
+              
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center space-x-4">
+                  <div className="flex items-center space-x-2">
+                    <div className={`w-3 h-3 rounded-full ${
+                      supabaseStatus === '✅ Connected' ? 'bg-green-500' : 
+                      supabaseStatus === 'Testing...' ? 'bg-yellow-500' : 'bg-red-500'
+                    }`}></div>
+                    <span className="text-sm font-medium">
+                      Status: {supabaseStatus}
+                    </span>
+                  </div>
                 </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Supabase Anon Key</label>
-                  <input
-                    type="text"
-                    value={supabaseKey}
-                    onChange={e => setSupabaseKey(e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono"
-                    placeholder="Your Supabase anon/public key"
-                  />
+                <div className="flex space-x-2">
+                  <button
+                    onClick={testSupabaseConnection}
+                    disabled={supabaseTesting}
+                    className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                  >
+                    {supabaseTesting ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <Wifi className="w-4 h-4 mr-2" />}
+                    Test Connection
+                  </button>
+                  <button
+                    onClick={() => setShowSupabaseConfig(true)}
+                    className="flex items-center px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
+                  >
+                    <Settings className="w-4 h-4 mr-2" />
+                    Configure
+                  </button>
                 </div>
               </div>
-              <div className="flex items-center space-x-4">
-                <button
-                  onClick={testSupabaseConnection}
-                  disabled={supabaseTesting}
-                  className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-                >
-                  {supabaseTesting ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <Wifi className="w-4 h-4 mr-2" />}
-                  Test Connection
-                </button>
-                <span className="text-sm font-medium">
-                  Status: {supabaseStatus}
-                </span>
+              
+              <div className="bg-gray-50 rounded-lg p-4">
+                <p className="text-sm text-gray-600">
+                  {supabaseStatus === '✅ Connected' 
+                    ? '✅ Supabase database is connected and ready for address management operations.'
+                    : supabaseStatus === 'Not Configured'
+                      ? '⏳ Configure your Supabase credentials to enable address management features.'
+                      : '⏳ Supabase credentials configured. Test connection to verify.'
+                  }
+                </p>
+                {supabaseStatus !== 'Not Configured' && supabaseStatus !== '✅ Connected' && (
+                  <p className="text-xs text-blue-600 mt-2">
+                    💡 Credentials are configured via environment variables
+                  </p>
+                )}
+                {supabaseStatus === 'Not Configured' && (
+                  <p className="text-xs text-gray-500 mt-2">
+                    🔒 Click "Configure" to securely enter your Supabase credentials
+                  </p>
+                )}
               </div>
             </div>
 
@@ -1729,6 +1781,64 @@ const LogisticsAutomationPlatform = () => {
                         <button
                           type="button"
                           onClick={() => setEditingAddress(null)}
+                          className="flex-1 bg-gray-300 text-gray-700 py-2 rounded-lg hover:bg-gray-400 transition-colors"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </form>
+                  </div>
+                </div>
+              )}
+
+              {/* Supabase Configuration Modal */}
+              {showSupabaseConfig && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40">
+                  <div className="bg-white rounded-xl shadow-2xl p-6 max-w-md w-full">
+                    <h3 className="text-lg font-bold mb-4">Configure Supabase Connection</h3>
+                    <p className="text-sm text-gray-600 mb-4">
+                      Enter your Supabase credentials securely. These will be stored locally and never exposed in the interface.
+                    </p>
+                    <form onSubmit={(e) => {
+                      e.preventDefault();
+                      const formData = new FormData(e.target);
+                      setSupabaseUrl(formData.get('supabase_url'));
+                      setSupabaseKey(formData.get('supabase_key'));
+                      setShowSupabaseConfig(false);
+                      addNotification('success', 'Supabase configuration updated', 'Test the connection to verify settings');
+                    }}>
+                      <div className="space-y-4">
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Supabase URL</label>
+                          <input
+                            type="text"
+                            name="supabase_url"
+                            required
+                            className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono"
+                            placeholder="https://xyzcompany.supabase.co"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Supabase Anon Key</label>
+                          <input
+                            type="password"
+                            name="supabase_key"
+                            required
+                            className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono"
+                            placeholder="Your Supabase anon/public key"
+                          />
+                        </div>
+                      </div>
+                      <div className="flex space-x-3 mt-6">
+                        <button
+                          type="submit"
+                          className="flex-1 bg-green-600 text-white py-2 rounded-lg hover:bg-green-700 transition-colors"
+                        >
+                          Save Configuration
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setShowSupabaseConfig(false)}
                           className="flex-1 bg-gray-300 text-gray-700 py-2 rounded-lg hover:bg-gray-400 transition-colors"
                         >
                           Cancel
