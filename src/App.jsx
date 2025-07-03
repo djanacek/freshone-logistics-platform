@@ -624,7 +624,7 @@ const LogisticsAutomationPlatform = () => {
       console.error('Samsara API Test Error:', error);
       addNotification('error', 'Samsara API Connection Failed', error.message);
     }
-  };
+  }
 
   // FreshOne API status check
   const checkApiStatus = () => {
