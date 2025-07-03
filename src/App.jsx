@@ -40,9 +40,9 @@ const LogisticsAutomationPlatform = () => {
   const [notifications, setNotifications] = useState([]);
   const [realTimeTracking, setRealTimeTracking] = useState([]);
   // Embedded API credentials for FreshOne production
-  const SAMSARA_API_TOKEN = 'samsara_api_KbeCZZQeCIR7Abf9SuxdWJt5CSOIDe';
+  const SAMSARA_API_TOKEN = import.meta.env.VITE_SAMSARA_API_TOKEN || '[YOUR_SAMSARA_TOKEN_HERE]';
   const SAMSARA_ORG_ID = '1288';
-  const NEXTBILLION_API_KEY = '[YOUR_NEXTBILLION_API_KEY_HERE]'; // Ready for when we get the key
+  const NEXTBILLION_API_KEY = import.meta.env.VITE_NEXTBILLION_API_KEY || '[YOUR_NEXTBILLION_API_KEY_HERE]';
   
   // FreshOne warehouse configuration
   const warehouseConfig = {
