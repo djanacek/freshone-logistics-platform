@@ -185,6 +185,48 @@ body {
 /* Transitions */
 .transition-all { transition: all 0.2s; }
 
+/* Modal positioning - CRITICAL for proper modal display */
+.fixed { position: fixed !important; }
+.inset-0 { 
+  top: 0 !important; 
+  right: 0 !important; 
+  bottom: 0 !important; 
+  left: 0 !important; 
+  width: 100% !important;
+  height: 100% !important;
+}
+.z-\[9999\] { z-index: 9999 !important; }
+.flex { display: flex; }
+.items-center { align-items: center; }
+.justify-center { justify-content: center; }
+.bg-black { background-color: black; }
+.bg-opacity-50 { background-color: rgba(0, 0, 0, 0.5); }
+.backdrop-blur-sm { backdrop-filter: blur(4px); }
+.max-w-4xl { max-width: 56rem; }
+.w-full { width: 100%; }
+.max-h-\[90vh\] { max-height: 90vh; }
+.overflow-y-auto { overflow-y: auto; }
+.mx-4 { margin-left: 1rem; margin-right: 1rem; }
+.transform { transform: translateZ(0); }
+.transition-all { transition: all 0.2s; }
+.duration-200 { transition-duration: 200ms; }
+.ease-out { transition-timing-function: cubic-bezier(0, 0, 0.2, 1); }
+.shadow-2xl { box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25); }
+
+/* Additional modal debugging styles */
+.modal-debug {
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  z-index: 9999 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  background-color: rgba(0, 0, 0, 0.5) !important;
+}
+
 /* Input styles */
 input, select, textarea {
   width: 100%;
