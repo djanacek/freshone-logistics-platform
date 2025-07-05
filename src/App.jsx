@@ -70,25 +70,38 @@ const LogisticsAutomationPlatform = () => {
   const [filePreviewData, setFilePreviewData] = useState([]);
   const [fileReady, setFileReady] = useState(false);
 
-  // Add state for missing customers report and modal
-  const [missingCustomersReport, setMissingCustomersReport] = useState([]);
-  const [showMissingCustomersModal, setShowMissingCustomersModal] = useState(false);
-  const [missingCustomersToAdd, setMissingCustomersToAdd] = useState([]);
-  const [similarMatchesToConfirm, setSimilarMatchesToConfirm] = useState([]);
-  const [confirmedMatches, setConfirmedMatches] = useState({});
+  // BOL comparison state
+  const [unmatchedCustomers, setUnmatchedCustomers] = useState([]);
+  const [comparisonComplete, setComparisonComplete] = useState(false);
+  const [confirmedMatches, setConfirmedMatches] = useState([]);
   const [customerNameMappings, setCustomerNameMappings] = useState({});
+  const [mappingsLoaded, setMappingsLoaded] = useState(false);
+  const [processingConfirmations, setProcessingConfirmations] = useState(new Set());
+  
+  // NextBillion.ai API status
+  const [nextBillionStatus, setNextBillionStatus] = useState('❌ Not Configured');
+  const [nextBillionTesting, setNextBillionTesting] = useState(false);
+
+
 
   // FreshOne production configuration - no localStorage needed for embedded credentials
 
-  // Workflow steps
-  const steps = [
+  // Workflow steps state
+  const [workflowSteps, setWorkflowSteps] = useState([
     { id: 0, title: 'Upload BOL', icon: Upload, status: 'pending' },
     { id: 1, title: 'Geocode Addresses', icon: MapPin, status: 'pending' },
     { id: 2, title: 'Route Optimization', icon: Route, status: 'pending' },
     { id: 3, title: 'Review & Approve Routes', icon: CheckCircle, status: 'pending' },
     { id: 4, title: 'Send to Samsara', icon: Send, status: 'pending' },
     { id: 5, title: 'Generate Reports', icon: FileText, status: 'pending' }
-  ];
+  ]);
+  
+  // Helper function to update step status
+  const updateStepStatus = (stepId, status) => {
+    setWorkflowSteps(prev => prev.map(step => 
+      step.id === stepId ? { ...step, status } : step
+    ));
+  };
 
   // Sample BOL data for demo
   const sampleBOLData = [
@@ -203,25 +216,99 @@ const LogisticsAutomationPlatform = () => {
     setTimeout(() => clearInterval(updateInterval), 120000);
   };
 
-  // Mock API functions
+  // Real NextBillion.ai geocoding function
   const geocodeAddresses = async (bolData) => {
     setProcessing(true);
     setCurrentStep(1);
-    addNotification('info', 'Starting address geocoding...', `Processing ${bolData.length} addresses`);
+    addNotification('info', 'Starting NextBillion.ai geocoding...', `Processing ${bolData.length} addresses`);
     
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    if (!NEXTBILLION_API_KEY || NEXTBILLION_API_KEY === '[YOUR_NEXTBILLION_API_KEY_HERE]') {
+      addNotification('error', 'NextBillion API key not configured', 'Please configure your NextBillion API key first');
+      setProcessing(false);
+      return bolData;
+    }
     
-    const geocoded = bolData.map((item, index) => ({
-      ...item,
-      lat: 28.0 + (index * 0.1),
-      lon: -81.5 - (index * 0.1),
-      geocoded: true,
-      address: `${item.Customer_Name}, ${item.City}, ${item.State}`
-    }));
+    const geocoded = [];
+    let successCount = 0;
+    let errorCount = 0;
+    
+    for (let i = 0; i < bolData.length; i++) {
+      const item = bolData[i];
+      const address = `${item.Customer_Name}, ${item.City}, ${item.State}`;
+      
+      try {
+        // Update progress
+        addNotification('info', `Geocoding address ${i + 1}/${bolData.length}`, address);
+        
+        const response = await fetch(`https://api.nextbillion.ai/geocode/v1.0/search?q=${encodeURIComponent(address)}`, {
+          method: 'GET',
+          headers: {
+            'Authorization': `Bearer ${NEXTBILLION_API_KEY}`,
+            'X-API-Key': NEXTBILLION_API_KEY
+          }
+        });
+        
+        if (response.ok) {
+          const data = await response.json();
+          
+          if (data.results && data.results.length > 0) {
+            const result = data.results[0];
+            geocoded.push({
+              ...item,
+              lat: result.geometry.location.lat,
+              lon: result.geometry.location.lng,
+              geocoded: true,
+              address: address,
+              formatted_address: result.formatted_address,
+              place_id: result.place_id
+            });
+            successCount++;
+          } else {
+            // Fallback to mock coordinates if no results
+            geocoded.push({
+              ...item,
+              lat: 28.0 + (i * 0.01),
+              lon: -81.5 - (i * 0.01),
+              geocoded: false,
+              address: address,
+              error: 'No geocoding results found'
+            });
+            errorCount++;
+          }
+        } else {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        
+        // Small delay to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+      } catch (error) {
+        console.error(`Geocoding error for ${address}:`, error);
+        // Fallback to mock coordinates
+        geocoded.push({
+          ...item,
+          lat: 28.0 + (i * 0.01),
+          lon: -81.5 - (i * 0.01),
+          geocoded: false,
+          address: address,
+          error: error.message
+        });
+        errorCount++;
+      }
+    }
     
     setGeocodedData(geocoded);
     setCurrentStep(2);
-    addNotification('success', 'Address geocoding completed', `${geocoded.length} addresses processed`);
+    updateStepStatus(1, 'complete'); // Mark geocoding as complete
+    
+    if (errorCount > 0) {
+      addNotification('warning', 'Geocoding completed with some errors', 
+        `${successCount} successful, ${errorCount} failed - using fallback coordinates for failed addresses`);
+    } else {
+      addNotification('success', 'NextBillion.ai geocoding completed', 
+        `${successCount} addresses successfully geocoded`);
+    }
+    
     return geocoded;
   };
 
@@ -381,6 +468,7 @@ const LogisticsAutomationPlatform = () => {
         setOptimizedRoutes(routes);
         setRoutesAwaitingApproval(routes);
         setCurrentStep(3);
+        updateStepStatus(2, 'complete'); // Mark route optimization as complete
         setShowRouteReview(true);
         addNotification('success', `FreshOne route optimization completed (${mode})`, `Generated ${routes.length} optimized route(s) - AWAITING APPROVAL`);
         return routes;
@@ -489,6 +577,7 @@ const LogisticsAutomationPlatform = () => {
         setOptimizedRoutes(routes);
         setRoutesAwaitingApproval(routes);
         setCurrentStep(3);
+        updateStepStatus(2, 'complete'); // Mark route optimization as complete
         setShowRouteReview(true);
         addNotification('success', `FreshOne route optimization completed (${mode})`, `Generated ${routes.length} optimized route(s) using NextBillion.ai - AWAITING APPROVAL`);
         return routes;
@@ -551,6 +640,7 @@ const LogisticsAutomationPlatform = () => {
       
       setSamsaraStatus('success');
       setCurrentStep(5);
+      updateStepStatus(4, 'complete'); // Mark send to Samsara as complete
       setShowRouteReview(false);
       
       startRealTimeTracking(routes);
@@ -608,6 +698,7 @@ const LogisticsAutomationPlatform = () => {
     
     setReports(generatedReports);
     setCurrentStep(6);
+    updateStepStatus(5, 'complete'); // Mark generate reports as complete
     addNotification('success', 'FreshOne Excel reports generated', 'Warehouse and customer reports ready');
     return generatedReports;
   };
@@ -615,6 +706,8 @@ const LogisticsAutomationPlatform = () => {
   // Manual approval function
   const approveAndSendToSamsara = async () => {
     try {
+      updateStepStatus(3, 'complete'); // Mark review & approve as complete
+      setCurrentStep(4);
       await sendToSamsara(routesAwaitingApproval);
       const generatedReports = await generateReports(routesAwaitingApproval);
       addNotification('success', 'Routes approved and sent!', 'All systems updated. Download reports below.');
@@ -633,6 +726,7 @@ const LogisticsAutomationPlatform = () => {
       setNotifications([]);
       
       setBolData(getActiveBolData());
+      updateStepStatus(0, 'complete'); // Mark BOL upload as complete
       setCurrentStep(1);
       addNotification('info', 'Automation started', 'Processing BOL data');
       
@@ -662,312 +756,21 @@ const LogisticsAutomationPlatform = () => {
       .replace(/specialinstructions/, 'special_instructions');
   }
 
-  // --- Universal Normalization ---
-  function normalizeBusinessName(name) {
-    if (!name) return '';
-    let n = name.toLowerCase();
-    n = n.replace(/\belem\b/g, 'elementary')
-         .replace(/\bms\b/g, 'middle school')
-         .replace(/\bhs\b/g, 'high school')
-         .replace(/\baca\b/g, 'academy')
-         .replace(/\bst\b/g, 'saint')
-         .replace(/\bdr\b/g, 'doctor')
-         .replace(/\bmt\b/g, 'mount')
-         .replace(/\bco\b/g, 'company')
-         .replace(/\binc\b/g, 'incorporated');
-    n = n.replace(/[^a-z0-9 ]/g, ' ')
-         .replace(/\b(school|elementary|middle|academy|high|the|of|and|dba|llc|ltd|company|corporation|incorporated)\b/g, '')
-         .replace(/\s+/g, ' ')
-         .trim();
-    return n;
-  }
-
-  // --- Universal Fuzzy Match ---
-  function levenshtein(a, b) {
-    const matrix = Array(a.length + 1).fill(null).map(() => Array(b.length + 1).fill(null));
-    for (let i = 0; i <= a.length; i++) matrix[i][0] = i;
-    for (let j = 0; j <= b.length; j++) matrix[0][j] = j;
-    for (let i = 1; i <= a.length; i++) {
-      for (let j = 1; j <= b.length; j++) {
-        const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-        matrix[i][j] = Math.min(
-          matrix[i - 1][j] + 1,
-          matrix[i][j - 1] + 1,
-          matrix[i - 1][j - 1] + cost
-        );
-      }
-    }
-    return matrix[a.length][b.length];
-  }
-  function jaroWinkler(s1, s2) {
-    // Simple Jaro-Winkler implementation
-    const m = s1.length, n = s2.length;
-    if (!m || !n) return 0;
-    const matchWindow = Math.max(m, n) / 2 - 1;
-    let matches = 0, transpositions = 0;
-    const s1Matches = Array(m).fill(false);
-    const s2Matches = Array(n).fill(false);
-    for (let i = 0; i < m; i++) {
-      const start = Math.max(0, i - matchWindow);
-      const end = Math.min(n, i + matchWindow + 1);
-      for (let j = start; j < end; j++) {
-        if (s2Matches[j]) continue;
-        if (s1[i] === s2[j]) {
-          s1Matches[i] = true;
-          s2Matches[j] = true;
-          matches++;
-          break;
-        }
-      }
-    }
-    if (!matches) return 0;
-    let k = 0;
-    for (let i = 0; i < m; i++) {
-      if (!s1Matches[i]) continue;
-      while (!s2Matches[k]) k++;
-      if (s1[i] !== s2[k]) transpositions++;
-      k++;
-    }
-    let jw = (matches / m + matches / n + (matches - transpositions / 2) / matches) / 3;
-    // Winkler bonus
-    let prefix = 0;
-    for (let i = 0; i < Math.min(4, m, n); i++) {
-      if (s1[i] === s2[i]) prefix++;
-      else break;
-    }
-    return jw + 0.1 * prefix * (1 - jw);
-  }
-  function tokenSetRatio(a, b) {
-    const setA = new Set(a.split(' '));
-    const setB = new Set(b.split(' '));
-    const intersection = new Set([...setA].filter(x => setB.has(x)));
-    const union = new Set([...setA, ...setB]);
-    return intersection.size / union.size;
-  }
-  function universalFuzzyMatch(str1, str2) {
-    const n1 = normalizeBusinessName(str1);
-    const n2 = normalizeBusinessName(str2);
-    if (!n1 || !n2) return 0;
-    if (n1 === n2) return 1.0;
-    const levScore = 1 - (levenshtein(n1, n2) / Math.max(n1.length, n2.length));
-    const jwScore = jaroWinkler(n1, n2);
-    const tokenScore = tokenSetRatio(n1, n2);
-    return Math.max(levScore, jwScore, tokenScore);
-  }
-
-  // --- Universal Matching Logic ---
-  function generateMissingCustomersReport(bolRows, addresses) {
-    const similarMatches = [];
-    const trulyMissing = [];
-    const addressList = addresses.map(addr => ({
-      name: addr.customer_name,
-      city: addr.city,
-      state: addr.state
-    }));
-    bolRows.forEach((row) => {
-      const customerName = row.Customer_Name || row.customer_name || row['Customer Name'] || row['customer_name'];
-      if (!customerName || !customerName.trim()) return;
-      const trimmedCustomerName = customerName.trim();
-      const storedMapping = customerNameMappings[trimmedCustomerName.toLowerCase()];
-      if (storedMapping) return;
-      // Find all universal fuzzy matches
-      const allSuggestions = addressList.map(addr => {
-        const score = universalFuzzyMatch(trimmedCustomerName, addr.name);
-        // Debug log for each comparison
-        console.log(`[DEBUG] BOL: '${trimmedCustomerName}' vs DB: '${addr.name}' | Score: ${score}`);
-        return { ...addr, score };
-      }).sort((a, b) => b.score - a.score);
-      const bestScore = allSuggestions[0]?.score || 0;
-      const bestMatch = allSuggestions[0];
-      if (bestScore === 1.0) {
-        // Perfect match, skip
-        return;
-      } else if (bestScore >= 0.7 && bestScore < 1.0) {
-        // Strong similar matches: always require user confirmation
-        similarMatches.push({
-          bolCustomer: trimmedCustomerName,
-          bestMatch: bestMatch ? { ...bestMatch, score: bestScore } : null,
-          allSuggestions: allSuggestions.filter(s => s.score >= 0.7 && s.score < 1.0).slice(0, 3)
-        });
-      } else if (bestScore >= 0.4 && bestScore < 0.7) {
-        // Moderate similar matches: require user confirmation
-        similarMatches.push({
-          bolCustomer: trimmedCustomerName,
-          bestMatch: bestMatch ? { ...bestMatch, score: bestScore } : null,
-          allSuggestions: allSuggestions.filter(s => s.score >= 0.4 && s.score < 0.7).slice(0, 3)
-        });
-      } else {
-        // Truly missing (red)
-        trulyMissing.push({
-          bolCustomer: trimmedCustomerName,
-          suggestions: allSuggestions.slice(0, 3).filter(s => s.score > 0.15)
-        });
-      }
-    });
-    // Debug log for output arrays
-    console.log('[DEBUG] Final similarMatches:', similarMatches);
-    console.log('[DEBUG] Final trulyMissing:', trulyMissing);
-    return { similarMatches, trulyMissing };
-  }
-
-  // --- Universal Test Suite ---
-  {process.env.NODE_ENV !== 'production' && (
-    <button
-      onClick={() => {
-        // Universal test cases
-        const testBOLRows = [
-          { customer_name: 'ANONA ELEMENTARY' },
-          { customer_name: 'CRYSTAL LAKE ELEM LAKE M' },
-          { customer_name: 'ST MARY SCHOOL' },
-          { customer_name: 'WASHINGTON HIGH' },
-          { customer_name: 'LINCOLN ELEM' },
-          { customer_name: 'MT VERNON' },
-          { customer_name: 'DR KING SCHOOL' },
-          { customer_name: 'SOUTHWEST MIDDLE LAKELAN' },
-          { customer_name: 'NO MATCH AT ALL' }
-        ];
-        const testAddresses = [
-          { customer_name: 'ANOMO', city: 'CITY1', state: 'FL' },
-          { customer_name: 'CRYSTAL LAKE ELEMENTARY', city: 'CITY2', state: 'FL' },
-          { customer_name: 'SAINT MARY SCHOOL', city: 'CITY3', state: 'FL' },
-          { customer_name: 'WASHINGTON HIGH SCHOOL', city: 'CITY4', state: 'FL' },
-          { customer_name: 'LINCOLN ELEMENTARY', city: 'CITY5', state: 'FL' },
-          { customer_name: 'MOUNT VERNON', city: 'CITY6', state: 'FL' },
-          { customer_name: 'DOCTOR KING SCHOOL', city: 'CITY7', state: 'FL' },
-          { customer_name: 'SOUTHWEST MIDDLE SCHOOL LAKELAND', city: 'CITY8', state: 'FL' }
-        ];
-        window.customerNameMappings = {};
-        // Log normalization and scores
-        testBOLRows.forEach(bol => {
-          testAddresses.forEach(addr => {
-            const nBol = normalizeBusinessName(bol.customer_name);
-            const nAddr = normalizeBusinessName(addr.customer_name);
-            const score = universalFuzzyMatch(bol.customer_name, addr.customer_name);
-            console.log(`BOL: '${bol.customer_name}' → '${nBol}' | DB: '${addr.customer_name}' → '${nAddr}' | Score: ${score}`);
-          });
-        });
-        // Call the report function
-        const { similarMatches, trulyMissing } = generateMissingCustomersReport(testBOLRows, testAddresses);
-        console.log('=== UNIVERSAL TEST SIMILAR MATCHES ===');
-        console.log('Similar Matches:', similarMatches);
-        console.log('Truly Missing:', trulyMissing);
-        alert(
-          `Similar Matches (green/yellow):\n` +
-          similarMatches.map(m => `${m.bolCustomer} → ${m.allSuggestions.map(s => s.name + ' (score: ' + s.score.toFixed(2) + ')').join(', ')}`).join('\n') +
-          `\n\nTruly Missing (red):\n` +
-          trulyMissing.map(m => m.bolCustomer).join(', ')
-        );
-      }}
-      className="mt-4 px-4 py-2 bg-yellow-300 text-yellow-900 rounded shadow font-bold border border-yellow-500 hover:bg-yellow-400"
-    >
-      🧪 Universal Test: Similar Matches Logic
-    </button>
-  )}
-
-  // Find best matches with score
-  function findBestAddressMatches(customerName, addresses, topN = 3) {
-    if (!addresses || addresses.length === 0) return [];
-    const scored = addresses.map(address => ({
-      address,
-      score: universalFuzzyMatch(customerName, address.customer_name)
-    }));
-    scored.sort((a, b) => b.score - a.score);
-    return scored.filter(s => s.score >= 0.5).slice(0, topN);
-  }
-
-  // Helper: Find best matching address from database
-  function findBestAddressMatch(customerName, addresses) {
-    if (!addresses || addresses.length === 0) return null;
-    
-    let bestMatch = null;
-    let bestScore = 0;
-    
-    addresses.forEach(address => {
-      const score = universalFuzzyMatch(customerName, address.customer_name);
-      if (score > bestScore && score >= 0.7) { // Changed to 70% to match missing customers report
-        bestScore = score;
-        bestMatch = address;
-      }
-    });
-    
-    return bestMatch;
-  }
-
-  // Helper: Map Excel row to BOL row with address lookup
-  async function mapExcelRowWithAddressLookup(row, colMap, addresses) {
-    const basicRow = {
+  // Helper: Map Excel row to BOL row (simple version)
+  function mapExcelRow(row, colMap) {
+    return {
       SO_Number: row[colMap.sonumber] || '',
       Customer_Name: row[colMap.customer_name] || '',
       City: row[colMap.city] || '',
       State: row[colMap.state] || '',
-      Cases: row[colMap.cases] || '',
+      Cases: parseInt(row[colMap.cases]) || 0,
       Delivery_Date: row[colMap.delivery_date] || '',
       Special_Instructions: row[colMap.special_instructions] || ''
     };
-
-    // If city/state are missing, try to find them in the address database
-    if ((!basicRow.City || !basicRow.State) && basicRow.Customer_Name && addresses.length > 0) {
-      const customerNameKey = basicRow.Customer_Name.trim().toLowerCase();
-      // 1. Use confirmed mapping if available
-      if (customerNameMappings[customerNameKey]) {
-        const confirmedName = customerNameMappings[customerNameKey];
-        const confirmedMatch = addresses.find(addr => addr.customer_name.toLowerCase() === confirmedName.toLowerCase());
-        if (confirmedMatch) {
-          if (!basicRow.City && confirmedMatch.city) basicRow.City = confirmedMatch.city;
-          if (!basicRow.State && confirmedMatch.state) basicRow.State = confirmedMatch.state;
-          if ((!basicRow.City || !basicRow.State) && confirmedMatch.full_address) {
-            const extracted = extractCityStateFromAddress(confirmedMatch.full_address);
-            if (!basicRow.City && extracted.city) basicRow.City = extracted.city;
-            if (!basicRow.State && extracted.state) basicRow.State = extracted.state;
-          }
-          basicRow.Full_Address = confirmedMatch.full_address;
-          basicRow.Zip_Code = confirmedMatch.zip_code;
-          basicRow.Phone = confirmedMatch.phone;
-          basicRow.Latitude = confirmedMatch.latitude;
-          basicRow.Longitude = confirmedMatch.longitude;
-          basicRow.Address_Match_Score = 1.0;
-          basicRow.Address_Source = 'User Confirmed';
-          return basicRow;
-        }
-      }
-      // 2. Only use perfect matches for auto-matching
-      let bestMatch = null;
-      let bestScore = 0;
-      addresses.forEach(address => {
-        const score = universalFuzzyMatch(basicRow.Customer_Name, address.customer_name);
-        if (score > bestScore) {
-          bestScore = score;
-          bestMatch = address;
-        }
-      });
-      if (bestScore === 1.0) {
-        // Only auto-fill if perfect match
-        if (!basicRow.City && bestMatch.city) basicRow.City = bestMatch.city;
-        if (!basicRow.State && bestMatch.state) basicRow.State = bestMatch.state;
-        if ((!basicRow.City || !basicRow.State) && bestMatch.full_address) {
-          const extracted = extractCityStateFromAddress(bestMatch.full_address);
-          if (!basicRow.City && extracted.city) basicRow.City = extracted.city;
-          if (!basicRow.State && extracted.state) basicRow.State = extracted.state;
-        }
-        basicRow.Full_Address = bestMatch.full_address;
-        basicRow.Zip_Code = bestMatch.zip_code;
-        basicRow.Phone = bestMatch.phone;
-        basicRow.Latitude = bestMatch.latitude;
-        basicRow.Longitude = bestMatch.longitude;
-        basicRow.Address_Match_Score = 1.0;
-        basicRow.Address_Source = 'Database Lookup';
-      } else {
-        // Do not auto-match for fuzzy matches; require user confirmation
-        // Leave address info blank
-      }
-    }
-    return basicRow;
   }
 
-  // Enhanced file upload handler with address database lookup
+  // Simple file upload handler
   const handleFileUpload = async (event) => {
-    // 1. Reset customerNameMappings to ensure no stale mappings
-    setCustomerNameMappings({});
     setFileUploadProgress('Reading file...');
     setFileUploadError('');
     setFileUploadWarnings([]);
@@ -995,7 +798,7 @@ const LogisticsAutomationPlatform = () => {
           colMap[norm] = col;
         });
         
-        // Check for minimum required columns (customer_name is the only absolute requirement)
+        // Check for minimum required columns
         const required = ['customer_name'];
         const missing = required.filter(r => !colMap[r]);
         if (missing.length) {
@@ -1004,91 +807,21 @@ const LogisticsAutomationPlatform = () => {
           return;
         }
         
-        // Load addresses from Supabase if not already loaded
-        let currentAddresses = addresses;
-        if (currentAddresses.length === 0 && supabase && supabaseStatus === '✅ Connected' && !addressesLoaded && !addressesLoading) {
-          setFileUploadProgress('Loading address database from Supabase...');
-          
-          try {
-            const { data: addressData, error } = await supabase
-              .from('customer_addresses')
-              .select('*')
-              .order('customer_name', { ascending: true })
-              .range(0, 9999); // Load up to 10,000 records to ensure we get all 1,835
-            
-            if (error) {
-              throw new Error(`Supabase error: ${error.message}`);
-            }
-            
-            currentAddresses = addressData || [];
-            setAddresses(currentAddresses); // Update the global addresses state
-            setAddressesLoaded(true);
-            
-            addNotification('success', 'Address database loaded for BOL processing', `${currentAddresses.length} addresses available`);
-          } catch (dbError) {
-            addNotification('error', 'Failed to load address database', dbError.message);
-            // Continue without address database
-            currentAddresses = [];
-          }
-        }
-        
-        // Check if we have address database available
-        const hasAddressDatabase = currentAddresses.length > 0;
-        const missingCityState = !colMap.city || !colMap.state;
-        
-        if (missingCityState && hasAddressDatabase) {
-          setFileUploadProgress(`Looking up addresses for ${json.length} customers...`);
-          addNotification('info', 'Address database lookup in progress', `Searching ${currentAddresses.length} addresses for ${json.length} customers`);
-        } else if (missingCityState && !hasAddressDatabase) {
-          setFileUploadError('Missing city/state columns and no address database available. Please upload addresses first or include city/state in BOL file.');
-          setFileUploadProgress('');
-          return;
-        }
-        
-        // Map and validate rows with address lookup
+        // Map rows to BOL format
         const previewRows = [];
-        const warnings = [];
-        let addressLookups = 0;
-        let successfulLookups = 0;
-        let totalCustomers = 0;
-        let matchedCustomers = 0;
-        let unmatchedCustomers = 0;
-        
         for (let idx = 0; idx < json.length; idx++) {
           const row = json[idx];
-          const mapped = await mapExcelRowWithAddressLookup(row, colMap, currentAddresses);
-          if (mapped.Customer_Name && mapped.Customer_Name.trim()) {
-            totalCustomers++;
-          }
-          if (mapped.Address_Source === 'Database Lookup' || mapped.Address_Source === 'User Confirmed') {
-            addressLookups++;
-            successfulLookups++;
-            matchedCustomers++;
-          } else if (missingCityState && mapped.Customer_Name) {
-            addressLookups++;
-            unmatchedCustomers++;
-          }
+          const mapped = mapExcelRow(row, colMap);
           previewRows.push(mapped);
         }
+        
         setFilePreviewData(previewRows);
-        setFileUploadWarnings(warnings);
-        // --- CRITICAL FIX: Use generateMissingCustomersReport to surface similar matches ---
-        const missingReport = generateMissingCustomersReport(json, currentAddresses);
-        // 2. Add debug logs for normalized names, scores, and output arrays
-        console.log('=== DEBUG: generateMissingCustomersReport output ===');
-        console.log('Similar matches:', missingReport.similarMatches);
-        console.log('Truly missing:', missingReport.trulyMissing);
-        setSimilarMatchesToConfirm(missingReport.similarMatches);
-        setMissingCustomersReport(missingReport.trulyMissing);
-        if (missingReport.similarMatches.length > 0) {
-          setFileUploadProgress('User confirmation required for similar matches. Please review the yellow section.');
-          setFileReady(false);
-          addNotification('warning', 'User confirmation required', `${missingReport.similarMatches.length} similar matches need confirmation.`);
-          return;
-        }
         setFileReady(true);
-        setFileUploadProgress('File parsed successfully. All customers matched or missing.');
-        addNotification('success', 'BOL processing completed', `Total: ${totalCustomers} | Matched: ${matchedCustomers} | Unmatched: ${unmatchedCustomers}`);
+        setFileUploadProgress('File parsed successfully.');
+        addNotification('success', 'BOL processing completed', `${previewRows.length} customers loaded`);
+        
+        // Run comparison immediately after BOL processing
+        runBOLComparison(previewRows);
       } catch (err) {
         setFileUploadError('Error parsing file: ' + err.message);
         setFileUploadProgress('');
@@ -1100,6 +833,435 @@ const LogisticsAutomationPlatform = () => {
       setFileUploadProgress('');
     };
     reader.readAsArrayBuffer(file);
+  };
+
+  // Create customer name mappings table in Supabase
+  const createCustomerNameMappingsTable = async () => {
+    if (!supabase) {
+      console.error('Supabase not available');
+      return;
+    }
+
+    try {
+      // Create the table if it doesn't exist
+      const { error } = await supabase.rpc('create_customer_name_mappings_table');
+      
+      if (error) {
+        // If RPC doesn't exist, try creating table directly
+        const { error: createError } = await supabase
+          .from('customer_name_mappings')
+          .select('*')
+          .limit(1);
+        
+        if (createError && createError.code === 'PGRST116') {
+          // Table doesn't exist, create it
+          const { error: sqlError } = await supabase.rpc('exec_sql', {
+            sql: `
+              CREATE TABLE IF NOT EXISTS customer_name_mappings (
+                id SERIAL PRIMARY KEY,
+                bol_customer_name TEXT NOT NULL,
+                db_customer_name TEXT NOT NULL,
+                similarity_score DECIMAL(3,2),
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                UNIQUE(bol_customer_name, db_customer_name)
+              );
+            `
+          });
+          
+          if (sqlError) {
+            console.error('Error creating mappings table:', sqlError);
+            addNotification('error', 'Database Error', 'Could not create mappings table');
+          } else {
+            console.log('Customer name mappings table created successfully');
+            addNotification('success', 'Database Setup', 'Mappings table created');
+          }
+        }
+      } else {
+        console.log('Customer name mappings table created successfully');
+        addNotification('success', 'Database Setup', 'Mappings table created');
+      }
+    } catch (error) {
+      console.error('Error creating mappings table:', error);
+      addNotification('error', 'Database Error', 'Could not create mappings table');
+    }
+  };
+
+  // Load existing customer name mappings from Supabase
+  const loadCustomerNameMappings = async () => {
+    if (!supabase) {
+      console.error('Supabase not available');
+      return;
+    }
+
+    try {
+      const { data, error } = await supabase
+        .from('customer_name_mappings')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (error) {
+        console.error('Error loading customer name mappings:', error);
+        // Try to create table if it doesn't exist
+        await createCustomerNameMappingsTable();
+        return;
+      }
+
+      const mappings = {};
+      data.forEach(mapping => {
+        mappings[mapping.bol_customer_name.toLowerCase()] = {
+          dbName: mapping.db_customer_name,
+          similarity: mapping.similarity_score || 0.8,
+          createdAt: mapping.created_at
+        };
+      });
+
+      setCustomerNameMappings(mappings);
+      setMappingsLoaded(true);
+      console.log(`Loaded ${Object.keys(mappings).length} customer name mappings`);
+    } catch (error) {
+      console.error('Error loading customer name mappings:', error);
+    }
+  };
+
+  // Clear all customer name mappings (for testing)
+  const clearCustomerNameMappings = async () => {
+    if (!supabase) {
+      console.error('Supabase not available');
+      return;
+    }
+
+    try {
+      const { error } = await supabase
+        .from('customer_name_mappings')
+        .delete()
+        .neq('id', 0); // Delete all records
+
+      if (error) {
+        console.error('Error clearing customer name mappings:', error);
+        addNotification('error', 'Clear Error', 'Could not clear mappings from database');
+        return false;
+      }
+
+      setCustomerNameMappings({});
+      setConfirmedMatches([]);
+      console.log('All customer name mappings cleared');
+      addNotification('success', 'Mappings Cleared', 'All stored mappings have been removed');
+      return true;
+    } catch (error) {
+      console.error('Error clearing customer name mappings:', error);
+      addNotification('error', 'Clear Error', 'Could not clear mappings from database');
+      return false;
+    }
+  };
+
+  // Save a confirmed customer name mapping to Supabase
+  const saveCustomerNameMapping = async (bolName, dbName, similarity) => {
+    if (!supabase) {
+      console.error('Supabase not available');
+      return;
+    }
+
+    try {
+      const { error } = await supabase
+        .from('customer_name_mappings')
+        .upsert({
+          bol_customer_name: bolName,
+          db_customer_name: dbName,
+          similarity_score: similarity
+        }, {
+          onConflict: 'bol_customer_name,db_customer_name'
+        });
+
+      if (error) {
+        console.error('Error saving customer name mapping:', error);
+        addNotification('error', 'Save Error', 'Could not save mapping to database');
+        return false;
+      }
+
+      // Update local state
+      setCustomerNameMappings(prev => ({
+        ...prev,
+        [bolName.toLowerCase()]: {
+          dbName: dbName,
+          similarity: similarity,
+          createdAt: new Date().toISOString()
+        }
+      }));
+
+      console.log(`Saved mapping: ${bolName} → ${dbName}`);
+      return true;
+    } catch (error) {
+      console.error('Error saving customer name mapping:', error);
+      addNotification('error', 'Save Error', 'Could not save mapping to database');
+      return false;
+    }
+  };
+
+  // Enhanced BOL comparison function with smart similar matching
+  const runBOLComparison = (bolData) => {
+    if (!bolData || bolData.length === 0) {
+      console.log('No BOL data to compare');
+      return;
+    }
+
+    if (!addresses || addresses.length === 0) {
+      console.log('No addresses loaded for comparison');
+      addNotification('warning', 'No addresses loaded', 'Please load the address database first');
+      return;
+    }
+
+    console.log(`Starting enhanced BOL comparison: ${bolData.length} BOL customers vs ${addresses.length} database addresses`);
+
+    // Normalization function for smart matching
+    const normalizeForComparison = (name) => {
+      if (!name) return '';
+      
+      let normalized = name.toLowerCase().trim();
+      
+      // Handle common abbreviations
+      const abbreviations = {
+        'elem': 'elementary',
+        'ms': 'middle school',
+        'hs': 'high school',
+        'st': 'saint',
+        'ave': 'avenue',
+        'rd': 'road',
+        'blvd': 'boulevard',
+        'dr': 'drive',
+        'ct': 'court',
+        'ln': 'lane',
+        'pl': 'place',
+        'cir': 'circle',
+        'pkwy': 'parkway',
+        'hwy': 'highway',
+        'intl': 'international',
+        'univ': 'university',
+        'coll': 'college',
+        'acad': 'academy',
+        'sch': 'school',
+        'elem sch': 'elementary school',
+        'mid sch': 'middle school',
+        'high sch': 'high school',
+        'elem.': 'elementary',
+        'sch.': 'school',
+        'ms.': 'middle school',
+        'hs.': 'high school',
+        'st.': 'saint',
+        'ave.': 'avenue',
+        'rd.': 'road',
+        'blvd.': 'boulevard',
+        'dr.': 'drive',
+        'ct.': 'court',
+        'ln.': 'lane',
+        'pl.': 'place',
+        'cir.': 'circle',
+        'pkwy.': 'parkway',
+        'hwy.': 'highway',
+        'intl.': 'international',
+        'univ.': 'university',
+        'coll.': 'college',
+        'acad.': 'academy'
+      };
+      
+      // Replace abbreviations
+      Object.entries(abbreviations).forEach(([abbr, full]) => {
+        const regex = new RegExp(`\\b${abbr}\\b`, 'gi');
+        normalized = normalized.replace(regex, full);
+      });
+      
+      // Remove common words that don't help with matching
+      const commonWords = [
+        'school', 'elementary', 'middle', 'high', 'academy', 'institute',
+        'center', 'centre', 'university', 'college', 'campus', 'district',
+        'public', 'private', 'charter', 'magnet', 'preparatory', 'prep'
+      ];
+      
+      commonWords.forEach(word => {
+        const regex = new RegExp(`\\b${word}\\b`, 'gi');
+        normalized = normalized.replace(regex, '');
+      });
+      
+      // Clean up extra spaces and punctuation
+      normalized = normalized.replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim();
+      
+      return normalized;
+    };
+
+    // Calculate similarity score between two names
+    const calculateSimilarity = (name1, name2) => {
+      const norm1 = normalizeForComparison(name1);
+      const norm2 = normalizeForComparison(name2);
+      
+      // Perfect match after normalization
+      if (norm1 === norm2) return 1.0;
+      
+      // Check for exact match after normalization
+      if (norm1.toLowerCase() === norm2.toLowerCase()) return 1.0;
+      
+      // Check for substring matches (one is contained in the other)
+      if (norm1.includes(norm2) || norm2.includes(norm1)) {
+        const shorter = norm1.length < norm2.length ? norm1 : norm2;
+        const longer = norm1.length < norm2.length ? norm2 : norm1;
+        const ratio = shorter.length / longer.length;
+        return 0.88 + (ratio * 0.1); // 88-98% for substring matches
+      }
+      
+      // Check for word overlap
+      const words1 = norm1.split(' ').filter(w => w.length > 1);
+      const words2 = norm2.split(' ').filter(w => w.length > 1);
+      
+      if (words1.length === 0 || words2.length === 0) return 0;
+      
+      const commonWords = words1.filter(word => words2.includes(word));
+      const totalWords = Math.max(words1.length, words2.length);
+      
+      let wordOverlap = commonWords.length / totalWords;
+      
+      // Boost score if all words from shorter name are found in longer name
+      if (words1.length !== words2.length) {
+        const shorter = words1.length < words2.length ? words1 : words2;
+        const longer = words1.length < words2.length ? words2 : words1;
+        const shorterInLonger = shorter.every(word => longer.includes(word));
+        if (shorterInLonger) {
+          wordOverlap = Math.min(0.95, wordOverlap + 0.2); // Boost by 20% but cap at 95%
+        }
+      }
+      
+      // Check for character-level similarity (Levenshtein-like)
+      let charMatches = 0;
+      const maxLength = Math.max(norm1.length, norm2.length);
+      
+      for (let i = 0; i < Math.min(norm1.length, norm2.length); i++) {
+        if (norm1[i] === norm2[i]) charMatches++;
+      }
+      
+      const charSimilarity = charMatches / maxLength;
+      
+      // Check for common prefixes/suffixes
+      let prefixMatch = 0;
+      for (let i = 0; i < Math.min(norm1.length, norm2.length); i++) {
+        if (norm1[i] === norm2[i]) {
+          prefixMatch++;
+        } else {
+          break;
+        }
+      }
+      const prefixSimilarity = prefixMatch / Math.max(norm1.length, norm2.length);
+      
+      // Combine scores with weights
+      const finalScore = (wordOverlap * 0.5) + (charSimilarity * 0.3) + (prefixSimilarity * 0.2);
+      
+      // Boost score for very similar names
+      if (finalScore > 0.8) {
+        return Math.min(0.99, finalScore + 0.1);
+      }
+      
+      return finalScore;
+    };
+
+    const exactMatches = [];
+    const similarMatches = [];
+    const noMatches = [];
+    
+    bolData.forEach(bolCustomer => {
+      const customerName = bolCustomer.Customer_Name || bolCustomer.customer_name;
+      if (!customerName) return;
+
+      // First, check if we have a stored mapping for this customer
+      const storedMapping = customerNameMappings[customerName.toLowerCase()];
+      if (storedMapping) {
+        // Find the mapped address in the database
+        const mappedAddress = addresses.find(addr => 
+          addr.customer_name && 
+          addr.customer_name.toLowerCase().trim() === storedMapping.dbName.toLowerCase().trim()
+        );
+        
+        if (mappedAddress) {
+          exactMatches.push({
+            name: customerName,
+            status: 'Previously confirmed match',
+            bolData: bolCustomer,
+            matchedAddress: mappedAddress,
+            mappingSource: 'stored'
+          });
+          return;
+        }
+      }
+
+      // Second, try exact match
+      const exactMatch = addresses.find(addr => 
+        addr.customer_name && 
+        addr.customer_name.toLowerCase().trim() === customerName.toLowerCase().trim()
+      );
+
+      if (exactMatch) {
+        exactMatches.push({
+          name: customerName,
+          status: 'Exact match found',
+          bolData: bolCustomer,
+          matchedAddress: exactMatch
+        });
+        return;
+      }
+
+      // Third, look for similar matches (only if no stored mapping exists)
+      const similarCandidates = addresses
+        .filter(addr => addr.customer_name)
+        .map(addr => ({
+          address: addr,
+          similarity: calculateSimilarity(customerName, addr.customer_name)
+        }))
+        .filter(candidate => candidate.similarity > 0.8) // Higher threshold for "similar"
+        .sort((a, b) => b.similarity - a.similarity)
+        .slice(0, 3); // Top 3 similar matches
+
+      if (similarCandidates.length > 0) {
+        const bestCandidate = similarCandidates[0];
+        
+        // Auto-match if similarity is 85%+ (high confidence)
+        if (bestCandidate.similarity >= 0.85) {
+          exactMatches.push({
+            name: customerName,
+            status: 'Auto-matched (high similarity)',
+            bolData: bolCustomer,
+            matchedAddress: bestCandidate.address,
+            similarity: bestCandidate.similarity
+          });
+        } else {
+          // Only show confirmation for genuinely ambiguous cases (80-84%)
+          similarMatches.push({
+            name: customerName,
+            status: 'Similar matches found',
+            bolData: bolCustomer,
+            candidates: similarCandidates,
+            bestMatch: bestCandidate
+          });
+        }
+      } else {
+        noMatches.push({
+          name: customerName,
+          status: 'No close matches found',
+          bolData: bolCustomer
+        });
+      }
+    });
+
+    setUnmatchedCustomers([...similarMatches, ...noMatches]);
+    setComparisonComplete(true);
+
+    const totalMatched = exactMatches.length;
+    const totalSimilar = similarMatches.length;
+    const totalNoMatch = noMatches.length;
+    
+    console.log(`Enhanced comparison complete: ${totalMatched} exact, ${totalSimilar} similar, ${totalNoMatch} no match`);
+
+    if (totalSimilar > 0 || totalNoMatch > 0) {
+      addNotification('warning', 'BOL Comparison Complete', 
+        `${totalMatched} exact matches, ${totalSimilar} similar matches need confirmation, ${totalNoMatch} need manual review`);
+    } else {
+      addNotification('success', 'BOL Comparison Complete', 
+        `All ${bolData.length} customers matched perfectly!`);
+    }
   };
 
   // Use parsed file data if ready, else sample data
@@ -1243,20 +1405,33 @@ const LogisticsAutomationPlatform = () => {
 
   // Test NextBillion API connection
   const testNextBillionConnection = async () => {
-    if (testMode) {
-      addNotification('info', 'NextBillion Connection Test (TEST MODE)', 'Simulating connection test - no actual API call made');
-      return;
-    }
-
     if (!NEXTBILLION_API_KEY || NEXTBILLION_API_KEY === '[YOUR_NEXTBILLION_API_KEY_HERE]') {
-      addNotification('error', 'NextBillion API key not configured', 'Please configure your NextBillion API key first');
+      setNextBillionStatus('❌ Not Configured');
+      addNotification('error', 'NextBillion not configured', 'Please configure NextBillion API key first');
       return;
     }
 
-    addNotification('info', 'Testing NextBillion API connection...', 'Making test API call to verify credentials');
+    setNextBillionTesting(true);
+    setNextBillionStatus('Testing...');
     
     try {
-      // Simple test payload with minimal data
+      console.log('Testing NextBillion API connection...');
+      
+      // Test geocoding endpoint first
+      const testAddress = '1600 Pennsylvania Avenue NW, Washington, DC';
+      const geocodeResponse = await fetch(`https://api.nextbillion.ai/geocode/v1.0/search?q=${encodeURIComponent(testAddress)}`, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${NEXTBILLION_API_KEY}`,
+          'X-API-Key': NEXTBILLION_API_KEY
+        }
+      });
+      
+      if (!geocodeResponse.ok) {
+        throw new Error(`Geocoding API failed: ${geocodeResponse.status}`);
+      }
+      
+      // Test route optimization endpoint
       const testPayload = {
         vehicles: [
           {
@@ -1280,7 +1455,7 @@ const LogisticsAutomationPlatform = () => {
         }
       };
 
-      const response = await fetch('https://api.nextbillion.io/optimization/v1/optimize', {
+      const optimizeResponse = await fetch('https://api.nextbillion.io/optimization/v1/optimize', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1290,18 +1465,21 @@ const LogisticsAutomationPlatform = () => {
         body: JSON.stringify(testPayload)
       });
       
-      if (response.ok) {
-        const data = await response.json();
-        addNotification('success', 'NextBillion API Connection Successful!', 'Route optimization API is working correctly');
-        console.log('NextBillion API Test Response:', data);
+      if (optimizeResponse.ok) {
+        const data = await optimizeResponse.json();
+        console.log('NextBillion API test successful, data:', data);
+        setNextBillionStatus('✅ Connected');
+        addNotification('success', 'NextBillion API connection successful', 'Geocoding and route optimization services are ready');
       } else {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(`HTTP ${response.status}: ${errorData.message || response.statusText}`);
+        const errorData = await optimizeResponse.json().catch(() => ({}));
+        throw new Error(`Route optimization API failed: ${optimizeResponse.status}: ${errorData.message || optimizeResponse.statusText}`);
       }
     } catch (error) {
-      console.error('NextBillion API Test Error:', error);
-      addNotification('error', 'NextBillion API Connection Failed', error.message);
+      console.error('NextBillion API test error:', error);
+      setNextBillionStatus('❌ Error: ' + error.message);
+      addNotification('error', 'NextBillion API connection failed', error.message);
     }
+    setNextBillionTesting(false);
   };
 
   // Test BOL and Address Database Integration
@@ -1330,7 +1508,9 @@ const LogisticsAutomationPlatform = () => {
       let matchesFound = 0;
       
       testCustomerNames.forEach(customerName => {
-        const match = findBestAddressMatch(customerName, addresses);
+        const match = addresses.find(addr => 
+          addr.customer_name && addr.customer_name.toLowerCase().includes(customerName.toLowerCase())
+        );
         if (match) {
           matchesFound++;
           console.log(`Test match found: ${customerName} -> ${match.customer_name} (${match.city}, ${match.state})`);
@@ -1644,7 +1824,6 @@ const LogisticsAutomationPlatform = () => {
   const checkApiStatus = () => {
     const mode = testMode ? 'TEST MODE' : 'LIVE MODE';
     const samsaraStatus = SAMSARA_API_TOKEN !== '[YOUR_SAMSARA_TOKEN_HERE]' ? '✅ Configured' : '⏳ Not configured';
-    const nextBillionStatus = NEXTBILLION_API_KEY !== '[YOUR_NEXTBILLION_API_KEY_HERE]' ? '✅ Configured' : '⏳ Not configured';
     
     addNotification('info', `FreshOne API Status (${mode})`, `Samsara: ${samsaraStatus} | NextBillion: ${nextBillionStatus}`);
   };
@@ -1779,147 +1958,7 @@ CREATE INDEX idx_customer_addresses_external_id ON customer_addresses(external_i
     }
   };
 
-  // Create customer name mappings table for permanent match storage
-  const createCustomerNameMappingsTable = async () => {
-    if (!supabase) {
-      addNotification('error', 'Supabase not configured', 'Please configure Supabase connection first');
-      return;
-    }
 
-    try {
-      addNotification('info', 'Creating customer_name_mappings table...', 'Setting up permanent match storage');
-
-      // Create the customer_name_mappings table using SQL
-      const createTableSQL = `
-CREATE TABLE IF NOT EXISTS customer_name_mappings (
-  id SERIAL PRIMARY KEY,
-  bol_name TEXT NOT NULL,
-  database_name TEXT NOT NULL,
-  confirmed_at TIMESTAMPTZ DEFAULT NOW(),
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Enable RLS
-ALTER TABLE customer_name_mappings ENABLE ROW LEVEL SECURITY;
-
--- Create policy to allow all operations for authenticated users
-CREATE POLICY "Allow all operations for authenticated users" ON customer_name_mappings
-  FOR ALL USING (true) WITH CHECK (true);
-
--- Create indexes for better performance
-CREATE INDEX IF NOT EXISTS idx_customer_name_mappings_bol_name ON customer_name_mappings(bol_name);
-CREATE INDEX IF NOT EXISTS idx_customer_name_mappings_database_name ON customer_name_mappings(database_name);
-      `;
-      
-      console.log('Customer name mappings table creation SQL:', createTableSQL);
-      
-      // Copy SQL to clipboard
-      navigator.clipboard.writeText(createTableSQL).catch(() => {
-        console.log('Could not copy to clipboard');
-      });
-      
-      addNotification('info', 'SQL copied to clipboard', 'Please run the SQL in Supabase SQL editor to create the mappings table');
-      
-    } catch (error) {
-      console.error('Error in createCustomerNameMappingsTable:', error);
-      addNotification('error', 'Failed to create mappings table', error.message);
-    }
-  };
-
-  // Load existing customer name mappings from database
-  const loadCustomerNameMappings = async () => {
-    console.log('=== LOAD CUSTOMER NAME MAPPINGS ===');
-    console.log('Supabase client available:', !!supabase);
-    
-    if (!supabase) {
-      console.error('Supabase client not available for loading mappings');
-      return;
-    }
-
-    try {
-      console.log('Querying customer_name_mappings table...');
-      const { data, error } = await supabase
-        .from('customer_name_mappings')
-        .select('*')
-        .order('created_at', { ascending: false });
-
-      if (error) {
-        console.error('Error loading mappings:', error);
-        addNotification('error', 'Failed to load mappings', error.message);
-        return;
-      }
-
-      console.log('Raw mappings data from database:', data);
-
-      // Convert array to object for faster lookup
-      const mappings = {};
-      data.forEach(mapping => {
-        mappings[mapping.bol_name.toLowerCase()] = mapping.database_name;
-      });
-
-      setCustomerNameMappings(mappings);
-      console.log('✅ Loaded customer name mappings:', mappings);
-      console.log('Total mappings loaded:', Object.keys(mappings).length);
-      
-      if (Object.keys(mappings).length > 0) {
-        addNotification('info', 'Customer name mappings loaded', `${Object.keys(mappings).length} permanent matches loaded from database`);
-      } else {
-        console.log('No existing mappings found in database');
-      }
-    } catch (error) {
-      console.error('Exception loading customer name mappings:', error);
-      addNotification('error', 'Failed to load mappings', error.message);
-    }
-  };
-
-  // Save confirmed match to database
-  const saveConfirmedMatch = async (bolName, databaseName) => {
-    console.log('=== SAVE CONFIRMED MATCH ===');
-    console.log('Saving match to database:', bolName, '->', databaseName);
-    console.log('Supabase client available:', !!supabase);
-    
-    if (!supabase) {
-      console.error('Supabase client not available');
-      addNotification('error', 'Cannot save match', 'Supabase not configured');
-      return;
-    }
-
-    try {
-      console.log('Attempting to insert into customer_name_mappings table...');
-      const { data, error } = await supabase
-        .from('customer_name_mappings')
-        .insert([{
-          bol_name: bolName,
-          database_name: databaseName,
-          confirmed_at: new Date().toISOString()
-        }])
-        .select();
-
-      if (error) {
-        console.error('Error saving confirmed match:', error);
-        addNotification('error', 'Failed to save match', error.message);
-        return;
-      }
-
-      console.log('Successfully saved to database:', data);
-
-      // Update local state
-      setCustomerNameMappings(prev => {
-        const newMappings = {
-          ...prev,
-          [bolName.toLowerCase()]: databaseName
-        };
-        console.log('Updated local mappings:', newMappings);
-        return newMappings;
-      });
-
-      console.log('✅ Match saved successfully:', bolName, '->', databaseName);
-      addNotification('success', 'Match saved permanently', `"${bolName}" -> "${databaseName}" saved to database`);
-    } catch (error) {
-      console.error('Exception saving confirmed match:', error);
-      addNotification('error', 'Failed to save match', error.message);
-    }
-  };
 
   // Address management state
   const [addresses, setAddresses] = useState([]);
@@ -2686,7 +2725,15 @@ CREATE TABLE customer_addresses (
     if (supabase && supabaseStatus === '✅ Connected' && !addressesLoaded && !addressesLoading) {
       console.log('Supabase client available and connected, loading addresses...');
       loadAddresses();
-      loadCustomerNameMappings(); // Load permanent customer name mappings
+      loadCustomerNameMappings(); // Load existing customer name mappings
+      
+      // Initialize NextBillion.ai status
+      if (NEXTBILLION_API_KEY && NEXTBILLION_API_KEY !== '[YOUR_NEXTBILLION_API_KEY_HERE]') {
+        setNextBillionStatus('⏳ Configured');
+      } else {
+        setNextBillionStatus('❌ Not Configured');
+      }
+
       addNotification('info', 'Loading address database', 'Fetching all addresses from Supabase...');
     } else if (supabase && supabaseStatus === '✅ Connected') {
       console.log('Supabase connected but addresses already loaded or loading in progress');
@@ -2708,44 +2755,7 @@ CREATE TABLE customer_addresses (
     }
   }, [addresses, addressesLoaded, addressesLoading]);
 
-  // Monitor modal state changes
-  useEffect(() => {
-    console.log('Modal state changed:', {
-      showMissingCustomersModal,
-      missingCustomersToAdd: missingCustomersToAdd.length
-    });
-  }, [showMissingCustomersModal, missingCustomersToAdd]);
 
-  // Monitor missing customers state changes
-  useEffect(() => {
-    console.log('=== MISSING CUSTOMERS STATE CHANGE ===');
-    console.log('Missing customers state changed:', {
-      missingCustomersReport: missingCustomersReport.length,
-      similarMatchesToConfirm: similarMatchesToConfirm.length,
-      totalUnmatched: missingCustomersReport.length + similarMatchesToConfirm.length
-    });
-    
-    if (missingCustomersReport.length > 0) {
-      console.log('✅ MISSING CUSTOMERS ALERT SHOULD BE VISIBLE');
-      console.log('Missing customers report updated:', missingCustomersReport);
-      console.log('Missing customers:', missingCustomersReport.map(m => m.bolCustomer));
-      
-      // Force a notification to confirm the state is set
-      addNotification('warning', 'Missing Customers Detected', 
-        `${missingCustomersReport.length} customers need to be added to the address database`);
-        
-      // Force a re-render to ensure the alert appears
-      setTimeout(() => {
-        console.log('Forcing re-render to ensure alert visibility');
-      }, 100);
-    } else {
-      console.log('No missing customers in report');
-    }
-    
-    if (similarMatchesToConfirm.length > 0) {
-      console.log('Similar matches to confirm updated:', similarMatchesToConfirm);
-    }
-  }, [missingCustomersReport, similarMatchesToConfirm]);
 
   // Test Supabase connection
   const testSupabaseConnection = async () => {
@@ -2805,454 +2815,10 @@ CREATE TABLE customer_addresses (
     setSupabaseTesting(false);
   };
 
-  // Function to confirm a similar match
-  const confirmSimilarMatch = async (bolCustomer, confirmedName) => {
-    console.log(`Confirming match: "${bolCustomer}" -> "${confirmedName}"`);
-    
-    // Save to permanent storage
-    await saveConfirmedMatch(bolCustomer, confirmedName);
-    
-    // Add to confirmed matches
-    setConfirmedMatches(prev => ({
-      ...prev,
-      [bolCustomer]: confirmedName
-    }));
-    
-    // Remove from similar matches
-    setSimilarMatchesToConfirm(prev => 
-      prev.filter(match => match.bolCustomer !== bolCustomer)
-    );
-    
-    addNotification('success', 'Match confirmed and saved permanently', `"${bolCustomer}" matched with "${confirmedName}" - will be remembered for future BOLs`);
-  };
 
-  // Function to reject a similar match (add to truly missing)
-  const rejectSimilarMatch = (bolCustomer) => {
-    console.log(`Rejecting match for: "${bolCustomer}"`);
-    
-    // Find the match details
-    const match = similarMatchesToConfirm.find(m => m.bolCustomer === bolCustomer);
-    
-    if (match) {
-      // Add to truly missing customers
-      setMissingCustomersReport(prev => [
-        ...prev,
-        {
-          bolCustomer: match.bolCustomer,
-          suggestions: match.allSuggestions
-        }
-      ]);
-      
-      // Remove from similar matches
-      setSimilarMatchesToConfirm(prev => 
-        prev.filter(m => m.bolCustomer !== bolCustomer)
-      );
-      
-      addNotification('info', 'Match rejected', `"${bolCustomer}" added to missing customers list`);
-    }
-  };
-
-  // Function to add missing customers to database
-  const addMissingCustomers = async (customersToAdd) => {
-    if (!supabase) {
-      addNotification('error', 'Supabase not configured', 'Please configure Supabase credentials first');
-      return;
-    }
-    
-    if (!customersToAdd || customersToAdd.length === 0) {
-      addNotification('error', 'No customers to add', 'Please provide customer information');
-      return;
-    }
-    
-    console.log('Adding missing customers to database:', customersToAdd);
-    
-    try {
-      // Prepare data for insertion
-      const customersData = customersToAdd.map(customer => ({
-        customer_name: customer.name,
-        full_address: customer.address,
-        city: customer.city,
-        state: customer.state,
-        zip_code: customer.zipCode || '',
-        phone: customer.phone || '',
-        special_instructions: customer.instructions || '',
-        latitude: customer.latitude ? parseFloat(customer.latitude) : null,
-        longitude: customer.longitude ? parseFloat(customer.longitude) : null,
-        external_id: `bol_import_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
-      }));
-      
-      console.log('Prepared customer data:', customersData);
-      
-      // Insert customers into database
-      const { data, error } = await supabase
-        .from('customer_addresses')
-        .insert(customersData)
-        .select();
-      
-      if (error) {
-        console.error('Failed to add customers:', error);
-        addNotification('error', 'Failed to add customers', error.message);
-        return;
-      }
-      
-      console.log('Successfully added customers:', data);
-      addNotification('success', 'Customers added successfully', `${customersData.length} customer(s) added to address database`);
-      
-      // Close modal
-      setShowMissingCustomersModal(false);
-      setMissingCustomersToAdd([]);
-      
-      // Reload addresses
-      await loadAddresses();
-      
-      // Re-run BOL matching if we have file data
-      if (filePreviewData.length > 0) {
-        console.log('Re-running BOL matching with updated address database...');
-        // Wait a moment for addresses to be updated, then re-run matching
-        setTimeout(async () => {
-          await loadAddresses(); // Ensure we have the latest addresses
-          const updatedMissingReport = generateMissingCustomersReport(filePreviewData, addresses);
-          setSimilarMatchesToConfirm(updatedMissingReport.similarMatches);
-          setMissingCustomersReport(updatedMissingReport.trulyMissing);
-          
-          const totalUnmatched = updatedMissingReport.similarMatches.length + updatedMissingReport.trulyMissing.length;
-          if (totalUnmatched === 0) {
-            addNotification('success', '100% Match Achieved!', 'All BOL customers now have addresses in the database');
-          } else {
-            addNotification('info', 'BOL matching updated', `${totalUnmatched} customer(s) still need attention`);
-          }
-        }, 1000);
-      }
-      
-    } catch (error) {
-      console.error('Error adding customers:', error);
-      addNotification('error', 'Failed to add customers', error.message);
-    }
-  };
-
-  // Generate missing customers report with similar match detection and permanent mappings
-  function generateMissingCustomersReport(bolRows, addresses) {
-    const similarMatches = [];
-    const trulyMissing = [];
-    const addressList = addresses.map(addr => ({
-      name: addr.customer_name,
-      city: addr.city,
-      state: addr.state
-    }));
-    bolRows.forEach((row) => {
-      const customerName = row.Customer_Name || row.customer_name || row['Customer Name'] || row['customer_name'];
-      if (!customerName || !customerName.trim()) return;
-      const trimmedCustomerName = customerName.trim();
-      const storedMapping = customerNameMappings[trimmedCustomerName.toLowerCase()];
-      if (storedMapping) return;
-      // Find all universal fuzzy matches
-      const allSuggestions = addressList.map(addr => {
-        const score = universalFuzzyMatch(trimmedCustomerName, addr.name);
-        // Debug log for each comparison
-        console.log(`[DEBUG] BOL: '${trimmedCustomerName}' vs DB: '${addr.name}' | Score: ${score}`);
-        return { ...addr, score };
-      }).sort((a, b) => b.score - a.score);
-      const bestScore = allSuggestions[0]?.score || 0;
-      const bestMatch = allSuggestions[0];
-      if (bestScore === 1.0) {
-        // Perfect match, skip
-        return;
-      } else if (bestScore >= 0.7 && bestScore < 1.0) {
-        // Strong similar matches: always require user confirmation
-        similarMatches.push({
-          bolCustomer: trimmedCustomerName,
-          bestMatch: bestMatch ? { ...bestMatch, score: bestScore } : null,
-          allSuggestions: allSuggestions.filter(s => s.score >= 0.7 && s.score < 1.0).slice(0, 3)
-        });
-      } else if (bestScore >= 0.4 && bestScore < 0.7) {
-        // Moderate similar matches: require user confirmation
-        similarMatches.push({
-          bolCustomer: trimmedCustomerName,
-          bestMatch: bestMatch ? { ...bestMatch, score: bestScore } : null,
-          allSuggestions: allSuggestions.filter(s => s.score >= 0.4 && s.score < 0.7).slice(0, 3)
-        });
-      } else {
-        // Truly missing (red)
-        trulyMissing.push({
-          bolCustomer: trimmedCustomerName,
-          suggestions: allSuggestions.slice(0, 3).filter(s => s.score > 0.15)
-        });
-      }
-    });
-    // Debug log for output arrays
-    console.log('[DEBUG] Final similarMatches:', similarMatches);
-    console.log('[DEBUG] Final trulyMissing:', trulyMissing);
-    return { similarMatches, trulyMissing };
-  }
-
-  // Debug/Test Button for Similar Matches with detailed logging and robust output
-  {process.env.NODE_ENV !== 'production' && (
-    <button
-      onClick={() => {
-        // Simulated BOL data
-        const testBOLRows = [
-          { customer_name: 'ANONA ELEMENTARY' },
-          { customer_name: 'CRYSTAL LAKE ELEM LAKE M' },
-          { customer_name: 'EXACT MATCH SCHOOL' },
-          { customer_name: 'NO MATCH AT ALL' }
-        ];
-        // Simulated address DB
-        const testAddresses = [
-          { customer_name: 'ANOMO', city: 'CITY1', state: 'FL' },
-          { customer_name: 'CRYSTAL LAKE ELEMENTARY', city: 'CITY2', state: 'FL' },
-          { customer_name: 'EXACT MATCH SCHOOL', city: 'CITY3', state: 'FL' }
-        ];
-        // Simulate empty mappings
-        window.customerNameMappings = {};
-        // Log normalization and scores
-        testBOLRows.forEach(bol => {
-          testAddresses.forEach(addr => {
-            const nBol = normalizeBusinessName(bol.customer_name);
-            const nAddr = normalizeBusinessName(addr.customer_name);
-            const score = universalFuzzyMatch(bol.customer_name, addr.customer_name);
-            console.log(`BOL: '${bol.customer_name}' → '${nBol}' | DB: '${addr.customer_name}' → '${nAddr}' | Score: ${score}`);
-          });
-        });
-        // Call the report function
-        const { similarMatches, trulyMissing } = generateMissingCustomersReport(testBOLRows, testAddresses);
-        console.log('=== TEST SIMILAR MATCHES ===');
-        console.log('Similar Matches:', similarMatches);
-        console.log('Truly Missing:', trulyMissing);
-        alert(
-          `Similar Matches (yellow):\n` +
-          similarMatches.map(m => `${m.bolCustomer} → ${m.allSuggestions.map(s => s.name + ' (score: ' + s.score.toFixed(2) + ')').join(', ')}`).join('\n') +
-          `\n\nTruly Missing (red):\n` +
-          trulyMissing.map(m => m.bolCustomer).join(', ')
-        );
-      }}
-      className="mt-4 px-4 py-2 bg-yellow-300 text-yellow-900 rounded shadow font-bold border border-yellow-500 hover:bg-yellow-400"
-    >
-      🧪 Test Similar Matches Logic (robust)
-    </button>
-  )}
-
-  // Debug: Show similarMatchesToConfirm and normalization
-  {process.env.NODE_ENV !== 'production' && (
-    <div className="mt-4 p-4 bg-yellow-50 border border-yellow-300 rounded">
-      <h4 className="font-bold text-yellow-800 mb-2">Debug: Similar Matches To Confirm</h4>
-      <pre className="text-xs text-yellow-900 bg-yellow-100 p-2 rounded overflow-x-auto">
-        {JSON.stringify(similarMatchesToConfirm, null, 2)}
-      </pre>
-      <h4 className="font-bold text-yellow-800 mt-4 mb-2">Debug: Normalized Names</h4>
-      <ul className="text-xs text-yellow-900 bg-yellow-100 p-2 rounded overflow-x-auto">
-        {addresses && addresses.length > 0 && bolData && bolData.length > 0 && bolData.map((bol, i) => (
-          <li key={i}>
-            BOL: '{bol.Customer_Name || bol.customer_name}' → '{normalizeBusinessName(bol.Customer_Name || bol.customer_name)}' | DB: {addresses.map(addr => `'${addr.customer_name}' → '${normalizeBusinessName(addr.customer_name)}'`).join(', ')}
-          </li>
-        ))}
-      </ul>
-    </div>
-  )}
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-green-50 to-lime-100">
-            {/* Missing Customers Modal - Moved to root level for proper positioning */}
-      {showMissingCustomersModal && (
-        <div 
-          className="fixed inset-0 z-[9999] flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm modal-debug"
-          style={{
-            position: 'fixed',
-            top: 0,
-            left: 0,
-            width: '100%',
-            height: '100%',
-            zIndex: 9999,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            backgroundColor: 'rgba(0, 0, 0, 0.5)'
-          }}
-        >
-                    {console.log('Modal should be visible - showMissingCustomersModal:', showMissingCustomersModal, 'missingCustomersToAdd:', missingCustomersToAdd)}
-          <div className="bg-white rounded-xl shadow-2xl p-8 max-w-4xl w-full max-h-[90vh] overflow-y-auto mx-4">
-            <div className="flex items-center justify-between mb-6">
-              <h3 className="text-xl font-bold text-gray-900">
-                Add Missing Customers to Address Database
-              </h3>
-              <button
-                onClick={() => setShowMissingCustomersModal(false)}
-                className="text-gray-500 hover:text-gray-800 text-2xl"
-              >
-                ×
-              </button>
-            </div>
-            
-            <div className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-              <p className="text-sm text-blue-800">
-                <strong>Instructions:</strong> Fill in the address details for each missing customer. 
-                Customer names are pre-filled from your BOL data. All fields marked with * are required.
-              </p>
-            </div>
-            
-            <form onSubmit={(e) => {
-              e.preventDefault();
-              const formData = new FormData(e.target);
-              const customersToAdd = [];
-              
-              // Extract data for each customer
-              missingCustomersToAdd.forEach((customer, index) => {
-                const name = formData.get(`name_${index}`);
-                const address = formData.get(`address_${index}`);
-                const city = formData.get(`city_${index}`);
-                const state = formData.get(`state_${index}`);
-                const zipCode = formData.get(`zipCode_${index}`);
-                const phone = formData.get(`phone_${index}`);
-                const instructions = formData.get(`instructions_${index}`);
-                
-                if (name && address && city && state) {
-                  customersToAdd.push({
-                    name,
-                    address,
-                    city,
-                    state,
-                    zipCode,
-                    phone,
-                    instructions
-                  });
-                }
-              });
-              
-              if (customersToAdd.length > 0) {
-                addMissingCustomers(customersToAdd);
-              } else {
-                addNotification('error', 'No valid customers to add', 'Please fill in at least the required fields (name, address, city, state)');
-              }
-            }}>
-              <div className="space-y-6">
-                {missingCustomersToAdd.map((customer, index) => (
-                  <div key={index} className="border border-gray-200 rounded-lg p-4 bg-gray-50">
-                    <h4 className="font-medium text-gray-900 mb-4 flex items-center">
-                      <span className="w-6 h-6 bg-green-500 text-white rounded-full flex items-center justify-center text-sm font-bold mr-2">
-                        {index + 1}
-                      </span>
-                      Customer {index + 1}
-                    </h4>
-                    
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                          Customer Name *
-                        </label>
-                        <input
-                          type="text"
-                          name={`name_${index}`}
-                          defaultValue={customer.name}
-                          required
-                          className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
-                          placeholder="Enter customer name"
-                        />
-                      </div>
-                      
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                          Full Address *
-                        </label>
-                        <input
-                          type="text"
-                          name={`address_${index}`}
-                          defaultValue={customer.address}
-                          required
-                          className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
-                          placeholder="Enter full address"
-                        />
-                      </div>
-                      
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                          City *
-                        </label>
-                        <input
-                          type="text"
-                          name={`city_${index}`}
-                          defaultValue={customer.city}
-                          required
-                          className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
-                          placeholder="Enter city"
-                        />
-                      </div>
-                      
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                          State *
-                        </label>
-                        <input
-                          type="text"
-                          name={`state_${index}`}
-                          defaultValue={customer.state}
-                          required
-                          className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
-                          placeholder="Enter state (e.g., FL)"
-                        />
-                      </div>
-                      
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                          Zip Code
-                        </label>
-                        <input
-                          type="text"
-                          name={`zipCode_${index}`}
-                          defaultValue={customer.zipCode}
-                          className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
-                          placeholder="Enter zip code"
-                        />
-                      </div>
-                      
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                          Phone
-                        </label>
-                        <input
-                          type="text"
-                          name={`phone_${index}`}
-                          defaultValue={customer.phone}
-                          className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
-                          placeholder="Enter phone number"
-                        />
-                      </div>
-                    </div>
-                    
-                    <div className="mt-4">
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                        Special Instructions
-                      </label>
-                      <textarea
-                        name={`instructions_${index}`}
-                        defaultValue={customer.instructions}
-                        rows="2"
-                        className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
-                        placeholder="Enter any special delivery instructions"
-                      />
-                    </div>
-                  </div>
-                ))}
-              </div>
-              
-              <div className="flex space-x-3 mt-6 pt-4 border-t border-gray-200">
-                <button
-                  type="submit"
-                  className="flex items-center px-6 py-3 bg-green-100 text-green-800 rounded-lg hover:bg-green-200 transition-colors border border-green-300 font-medium"
-                >
-                  <Users className="w-4 h-4 mr-2" />
-                  Add {missingCustomersToAdd.length} Customer{missingCustomersToAdd.length > 1 ? 's' : ''} to Database
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowMissingCustomersModal(false)}
-                  className="flex items-center px-6 py-3 bg-gray-100 text-gray-800 rounded-lg hover:bg-gray-200 transition-colors border border-gray-300 font-medium"
-                >
-                  Cancel
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
 
       {/* Header */}
       <div className="bg-white shadow-lg border-b-4 border-green-500">
@@ -3329,7 +2895,7 @@ CREATE TABLE customer_addresses (
             <div className="bg-white rounded-xl shadow-lg p-6 mb-6">
               <h2 className="text-xl font-bold text-gray-900 mb-6">Workflow Status</h2>
               <div className="space-y-4">
-                {steps.map((step) => (
+                {workflowSteps.map((step) => (
                   <StatusIndicator key={step.id} step={step} active={currentStep === step.id} />
                 ))}
               </div>
@@ -3580,6 +3146,53 @@ CREATE TABLE customer_addresses (
                 </div>
                 FreshOne Bill of Lading Upload
               </h2>
+              
+              {/* BOL Processing Summary - Moved to top */}
+              {filePreviewData.length > 0 && comparisonComplete && (
+                <div className="mb-6 p-4 bg-gradient-to-r from-green-50 to-blue-50 border-2 border-green-200 rounded-xl">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-3">
+                      <CheckCircle className="w-6 h-6 text-green-600" />
+                      <div>
+                        <h3 className="text-lg font-bold text-green-800">BOL Processing Complete</h3>
+                        <p className="text-sm text-green-600">
+                          {filePreviewData.length} customers loaded • {Object.keys(customerNameMappings).length} stored mappings
+                        </p>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="text-2xl font-bold text-green-800">
+                        {filePreviewData.length - unmatchedCustomers.length + confirmedMatches.length}/{filePreviewData.length}
+                      </div>
+                      <div className="text-sm text-green-600">customers matched</div>
+                      <div className="text-xs text-gray-600 mt-1">
+                        {unmatchedCustomers.filter(c => c.status === 'Similar matches found').length} need confirmation • {unmatchedCustomers.filter(c => c.status === 'No close matches found').length} need review
+                      </div>
+                    </div>
+                  </div>
+                  
+                  <div className="mt-3 flex items-center justify-center space-x-6 text-sm">
+                    <span className="text-green-700 font-medium">
+                      ✅ {filePreviewData.length - unmatchedCustomers.length} auto-matched
+                    </span>
+                    {confirmedMatches.length > 0 && (
+                      <span className="text-blue-700 font-medium">
+                        ✓ {confirmedMatches.length} confirmed
+                      </span>
+                    )}
+                    {unmatchedCustomers.filter(c => c.status === 'Similar matches found').length > 0 && (
+                      <span className="text-yellow-700 font-medium">
+                        ⚠️ {unmatchedCustomers.filter(c => c.status === 'Similar matches found').length} need confirmation
+                      </span>
+                    )}
+                    {unmatchedCustomers.filter(c => c.status === 'No close matches found').length > 0 && (
+                      <span className="text-red-700 font-medium">
+                        ❌ {unmatchedCustomers.filter(c => c.status === 'No close matches found').length} need manual review
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
               <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center">
                 <Upload className="w-12 h-12 text-gray-400 mx-auto mb-4" />
                 <p className="text-gray-600 mb-4">
@@ -3619,6 +3232,8 @@ CREATE TABLE customer_addresses (
                       setFileUploadError('');
                       setFileUploadWarnings([]);
                       setFileUploadProgress('');
+                      // Run comparison with sample data
+                      runBOLComparison(sampleBOLData);
                     }}
                     className="bg-gray-100 text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-200 transition-colors border border-gray-300"
                   >
@@ -3677,220 +3292,478 @@ CREATE TABLE customer_addresses (
                       </tbody>
                     </table>
                   </div>
-                  {/* Address Lookup Summary */}
-                  {filePreviewData.length > 0 && filePreviewData.some(item => item.Address_Source === 'Database Lookup') && (
-                    <div className="mt-4 p-3 bg-green-50 border border-green-200 rounded-lg">
-                      <div className="flex items-center space-x-2">
-                        <CheckCircle className="w-4 h-4 text-green-600" />
-                        <span className="text-sm font-medium text-green-800">Address Database Integration Active</span>
-                      </div>
-                      <p className="text-xs text-green-600 mt-1">
-                        {filePreviewData.filter(item => item.Address_Source === 'Database Lookup').length} customers matched with address database
-                      </p>
-                    </div>
-                  )}
-                  {/* Similar Matches Confirmation Section */}
-                  {similarMatchesToConfirm.length > 0 && (
-                    <div className="mt-6 bg-yellow-50 border-4 border-yellow-400 rounded-lg p-6 shadow-lg">
-                      <div className="flex items-center mb-4">
-                        <div className="w-8 h-8 bg-yellow-500 rounded-full flex items-center justify-center mr-3">
-                          <span className="text-white font-bold text-lg">🤔</span>
-                        </div>
-                        <div>
-                          <h4 className="text-xl font-bold text-yellow-800">
-                            SIMILAR MATCHES FOUND - Please Confirm
-                          </h4>
-                          <p className="text-yellow-700 font-medium">
-                            {similarMatchesToConfirm.length} customer{similarMatchesToConfirm.length > 1 ? 's' : ''} have similar names in the database
-                          </p>
-                        </div>
-                      </div>
-                      <div className="bg-white border-2 border-yellow-300 rounded-lg p-4 mb-4">
-                        <h5 className="font-bold text-yellow-800 mb-3 text-lg">Please Confirm These Matches:</h5>
-                        <div className="space-y-4">
-                          {similarMatchesToConfirm.map((item, idx) => (
-                            <div key={idx} className="border-l-4 border-yellow-400 pl-4 py-3 bg-yellow-50 rounded-r-lg">
-                              <div className="flex items-center justify-between mb-2">
-                                <div>
-                                  <p className="font-bold text-yellow-900 text-lg">
-                                    "{item.bolCustomer}"
-                                  </p>
-                                  <p className="text-yellow-700 font-medium">
-                                    Did you mean one of these?
-                                  </p>
-                                </div>
-                                <div className="text-right">
-                                  <span className="bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full text-sm font-bold">
-                                    NEEDS CONFIRMATION
-                                  </span>
-                                </div>
-                              </div>
-                              <div className="flex flex-col md:flex-row md:space-x-3 mt-3 space-y-2 md:space-y-0">
-                                {item.allSuggestions.map((s, i) => (
-                                  <button
-                                    key={i}
-                                    onClick={() => confirmSimilarMatch(item.bolCustomer, s.name)}
-                                    className="flex items-center px-4 py-2 bg-green-100 text-green-800 rounded-lg hover:bg-green-200 transition-colors border border-green-300 font-medium mb-2 md:mb-0"
-                                  >
-                                    <CheckCircle className="w-4 h-4 mr-2" />
-                                    {s.name}
-                                    {s.city && s.state && (
-                                      <span className="ml-2 text-xs text-gray-600">({s.city}, {s.state})</span>
-                                    )}
-                                    <span className="ml-2 text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded">
-                                      Score: {s.score.toFixed(2)}
-                                    </span>
-                                  </button>
-                                ))}
-                                <button
-                                  onClick={() => rejectSimilarMatch(item.bolCustomer)}
-                                  className="flex items-center px-4 py-2 bg-red-100 text-red-800 rounded-lg hover:bg-red-200 transition-colors border border-red-300 font-medium"
-                                >
-                                  <X className="w-4 h-4 mr-2" />
-                                  Add as New
-                                </button>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                      <div className="bg-yellow-100 border border-yellow-300 rounded-lg p-4">
-                        <div className="flex items-center space-x-2 mb-2">
-                          <AlertCircle className="w-5 h-5 text-yellow-600" />
-                          <span className="font-bold text-yellow-800">CONFIRMATION REQUIRED</span>
-                        </div>
-                        <p className="text-yellow-700 text-sm">
-                          Please confirm if these are the same customers with slightly different names. Choosing a candidate will use the correct database name for routing. If none match, click 'Add as New'.
-                        </p>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Truly Missing Customers Report - RED WARNING */}
-                  {missingCustomersReport.length > 0 && (
-                    <div className="mt-6 bg-red-50 border-4 border-red-400 rounded-lg p-6 shadow-lg">
-                      <div className="flex items-center mb-4">
-                        <div className="w-8 h-8 bg-red-500 rounded-full flex items-center justify-center mr-3">
-                          <span className="text-white font-bold text-lg">❌</span>
-                        </div>
-                        <div>
-                          <h4 className="text-xl font-bold text-red-800">
-                            MISSING CUSTOMERS DETECTED
-                          </h4>
-                          <p className="text-red-700 font-medium">
-                            {missingCustomersReport.length} customer{missingCustomersReport.length > 1 ? 's' : ''} missing from address database
-                          </p>
-                        </div>
-                      </div>
-                      
-                      <div className="bg-white border-2 border-red-300 rounded-lg p-4 mb-4">
-                        <h5 className="font-bold text-red-800 mb-3 text-lg">Unmatched BOL Customers:</h5>
-                        <div className="space-y-3">
-                          {missingCustomersReport.map((item, idx) => (
-                            <div key={idx} className="border-l-4 border-red-400 pl-4 py-2">
-                              <div className="flex items-center justify-between">
-                                <div>
-                                  <p className="font-bold text-red-900 text-lg">
-                                    {item.bolCustomer}
-                                  </p>
-                                  <p className="text-red-700 font-medium">
-                                    ❌ No match found in address database
-                                  </p>
-                                </div>
-                                <div className="text-right">
-                                  <span className="bg-red-100 text-red-800 px-3 py-1 rounded-full text-sm font-bold">
-                                    MISSING
-                                  </span>
-                                </div>
-                              </div>
-                              
-                              {/* Show suggestions if any exist */}
-                              {item.suggestions.length > 0 && (
-                                <div className="mt-2 pl-4 border-l-2 border-gray-300">
-                                  <p className="text-sm text-gray-600 font-medium mb-1">
-                                    Similar matches in database:
-                                  </p>
-                                  <ul className="space-y-1">
-                                    {item.suggestions.map((s, i) => (
-                                      <li key={i} className="text-sm">
-                                        <span className="font-mono text-gray-800 bg-gray-100 px-2 py-1 rounded">
-                                          {s.name}
-                                        </span>
-                                        {s.city && s.state && (
-                                          <span className="ml-2 text-xs text-gray-600">
-                                            ({s.city}, {s.state})
-                                          </span>
-                                        )}
-                                        <span className="ml-2 text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded">
-                                          Score: {s.score.toFixed(2)}
-                                        </span>
-                                      </li>
-                                    ))}
-                                  </ul>
-                                </div>
-                              )}
-                              
-                              {item.suggestions.length === 0 && (
-                                <div className="mt-2 pl-4 border-l-2 border-gray-300">
-                                  <p className="text-sm text-gray-600">
-                                    💡 No similar matches found. Consider adding this customer to the address database.
-                                  </p>
-                                </div>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                      
-                      <div className="bg-red-100 border border-red-300 rounded-lg p-4">
-                        <div className="flex items-center space-x-2 mb-2">
-                          <AlertCircle className="w-5 h-5 text-red-600" />
-                          <span className="font-bold text-red-800">ACTION REQUIRED</span>
-                        </div>
-                        <p className="text-red-700 text-sm">
-                          These customers must be added to the address database before routing can proceed. 
-                          Missing customers will be excluded from route optimization, potentially leaving stops unassigned.
-                        </p>
-                        <div className="mt-3 flex space-x-3">
-                          <button
-                            onClick={() => {
-                              // Prepare missing customers data for the modal
-                              const customersToAdd = missingCustomersReport.map(item => ({
-                                name: item.bolCustomer,
-                                address: '',
-                                city: '',
-                                state: '',
-                                zipCode: '',
-                                phone: '',
-                                instructions: ''
-                              }));
-                              setMissingCustomersToAdd(customersToAdd);
-                              setShowMissingCustomersModal(true);
-                            }}
-                            className="flex items-center px-4 py-2 bg-green-100 text-green-800 rounded-lg hover:bg-green-200 transition-colors border border-green-300 font-medium"
-                          >
-                            <Users className="w-4 h-4 mr-2" />
-                            📝 Add Missing Customers
-                          </button>
-                          <button
-                            onClick={() => {
-                              const missingNames = missingCustomersReport.map(item => item.bolCustomer).join('\n');
-                              navigator.clipboard.writeText(missingNames).then(() => {
-                                addNotification('success', 'Missing customers copied to clipboard', 'Paste this list to add them to your address database');
-                              });
-                            }}
-                            className="flex items-center px-4 py-2 bg-blue-100 text-blue-800 rounded-lg hover:bg-blue-200 transition-colors border border-blue-300 font-medium"
-                          >
-                            <Copy className="w-4 h-4 mr-2" />
-                            📋 Copy Missing List
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  )}
                 </div>
               )}
             </div>
+
+            {/* BOL Comparison Results - Similar Matches */}
+            {comparisonComplete && unmatchedCustomers.filter(c => c.status === 'Similar matches found').length > 0 && (
+              <div className="bg-yellow-50 border-2 border-yellow-200 rounded-xl p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-xl font-bold text-yellow-800 flex items-center">
+                    <AlertCircle className="w-6 h-6 mr-2" />
+                    Similar Matches Found - Please Confirm
+                  </h2>
+                  <div className="flex items-center space-x-2">
+                    <span className="px-3 py-1 rounded-full text-sm font-medium bg-yellow-100 text-yellow-800">
+                      {unmatchedCustomers.filter(c => c.status === 'Similar matches found').length} customers need confirmation
+                    </span>
+                    {confirmedMatches.length > 0 && (
+                      <span className="px-3 py-1 rounded-full text-sm font-medium bg-green-100 text-green-800">
+                        {confirmedMatches.length} confirmed
+                      </span>
+                    )}
+                  </div>
+                </div>
+                
+                <div className="bg-white rounded-lg p-4">
+                  <div className="space-y-4">
+                    {unmatchedCustomers
+                      .filter(customer => customer.status === 'Similar matches found')
+                      .map((customer, index) => (
+                        <div key={index} className="border border-yellow-200 rounded-lg p-4 bg-yellow-50">
+                          <div className="flex items-center justify-between mb-3">
+                            <div>
+                              <h3 className="font-medium text-gray-900">{customer.name}</h3>
+                              <p className="text-sm text-gray-600">
+                                {customer.bolData.City}, {customer.bolData.State} • {customer.bolData.Cases} cases
+                              </p>
+                            </div>
+                            <span className="px-2 py-1 rounded-full bg-yellow-100 text-yellow-800 text-xs">
+                              Similarity: {Math.round(customer.bestMatch.similarity * 100)}%
+                            </span>
+                          </div>
+                          
+                          <div className="space-y-2">
+                            <p className="text-sm text-gray-700 font-medium">Did you mean:</p>
+                            {customer.candidates.map((candidate, idx) => (
+                              <div key={idx} className="flex items-center justify-between p-2 bg-white rounded border border-yellow-200">
+                                <div className="flex-1">
+                                  <p className="text-sm font-medium text-gray-900">
+                                    {candidate.address.customer_name}
+                                  </p>
+                                  <p className="text-xs text-gray-600">
+                                    {candidate.address.city}, {candidate.address.state}
+                                  </p>
+                                </div>
+                                <div className="flex space-x-2 ml-4">
+                                  <button
+                                    onClick={async () => {
+                                      const confirmationKey = `${customer.name}-${candidate.address.customer_name}`;
+                                      
+                                      // Prevent double-clicks
+                                      if (processingConfirmations.has(confirmationKey)) return;
+                                      
+                                      // Handle confirmation - save permanently and add to confirmed matches
+                                      console.log(`Confirmed: ${customer.name} → ${candidate.address.customer_name}`);
+                                      
+                                      // Mark as processing
+                                      setProcessingConfirmations(prev => new Set(prev).add(confirmationKey));
+                                      
+                                      // IMMEDIATE UI UPDATE - don't wait for database
+                                      // Add to confirmed matches immediately
+                                      setConfirmedMatches(prev => [...prev, {
+                                        bolName: customer.name,
+                                        dbName: candidate.address.customer_name,
+                                        bolData: customer.bolData,
+                                        dbData: candidate.address,
+                                        similarity: candidate.similarity,
+                                        saved: false // Will be updated to true after save
+                                      }]);
+                                      
+                                      // Remove from unmatched customers immediately
+                                      setUnmatchedCustomers(prev => 
+                                        prev.filter(c => c.name !== customer.name)
+                                      );
+                                      
+                                      // Show immediate success notification
+                                      addNotification('success', 'Match Confirmed!', 
+                                        `${customer.name} matched to ${candidate.address.customer_name}`);
+                                      
+                                      // Save to database in background
+                                      try {
+                                        const saved = await saveCustomerNameMapping(
+                                          customer.name, 
+                                          candidate.address.customer_name, 
+                                          candidate.similarity
+                                        );
+                                        
+                                        if (saved) {
+                                          // Update the confirmed match to show it was saved
+                                          setConfirmedMatches(prev => 
+                                            prev.map(match => 
+                                              match.bolName === customer.name 
+                                                ? { ...match, saved: true }
+                                                : match
+                                            )
+                                          );
+                                          
+                                          addNotification('success', 'Match Saved Permanently', 
+                                            `${customer.name} → ${candidate.address.customer_name} will be auto-matched in future BOLs`);
+                                        } else {
+                                          addNotification('warning', 'Match Confirmed but Not Saved', 
+                                            `${customer.name} → ${candidate.address.customer_name} (database save failed)`);
+                                        }
+                                      } catch (error) {
+                                        console.error('Error saving mapping:', error);
+                                        addNotification('warning', 'Match Confirmed but Not Saved', 
+                                          `${customer.name} → ${candidate.address.customer_name} (database error)`);
+                                      } finally {
+                                        // Remove from processing set
+                                        setProcessingConfirmations(prev => {
+                                          const newSet = new Set(prev);
+                                          newSet.delete(confirmationKey);
+                                          return newSet;
+                                        });
+                                      }
+                                    }}
+                                    disabled={processingConfirmations.has(`${customer.name}-${candidate.address.customer_name}`)}
+                                    className={`px-3 py-1 rounded text-sm transition-colors border ${
+                                      processingConfirmations.has(`${customer.name}-${candidate.address.customer_name}`)
+                                        ? 'bg-gray-100 text-gray-400 cursor-not-allowed border-gray-200'
+                                        : 'bg-green-100 text-green-800 hover:bg-green-200 border-green-300'
+                                    }`}
+                                  >
+                                    {processingConfirmations.has(`${customer.name}-${candidate.address.customer_name}`) ? 'Saving...' : 'Yes'}
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      // Handle rejection
+                                      console.log(`Rejected: ${customer.name} → ${candidate.address.customer_name}`);
+                                    }}
+                                    className="px-3 py-1 bg-gray-100 text-gray-800 rounded text-sm hover:bg-gray-200 transition-colors border border-gray-300"
+                                  >
+                                    No
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                  </div>
+                  
+                  <div className="mt-4 p-3 bg-yellow-100 border border-yellow-300 rounded-lg">
+                    <div className="flex items-center space-x-2">
+                      <AlertTriangle className="w-4 h-4 text-yellow-600" />
+                      <span className="text-sm font-medium text-yellow-800">Quick Confirmation</span>
+                    </div>
+                    <p className="text-xs text-yellow-700 mt-1">
+                      These are likely matches based on similar names. Click "Yes" to confirm the match or "No" to reject.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* BOL Comparison Results - No Matches */}
+            {comparisonComplete && unmatchedCustomers.filter(c => c.status === 'No close matches found').length > 0 && (
+              <div className="bg-red-50 border-2 border-red-200 rounded-xl p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-xl font-bold text-red-800 flex items-center">
+                    <AlertCircle className="w-6 h-6 mr-2" />
+                    No Close Matches Found - Need Manual Review
+                  </h2>
+                  <div className="flex items-center space-x-2">
+                    <span className="px-3 py-1 rounded-full text-sm font-medium bg-red-100 text-red-800">
+                      {unmatchedCustomers.filter(c => c.status === 'No close matches found').length} customers need manual review
+                    </span>
+                  </div>
+                </div>
+                
+                <div className="bg-white rounded-lg p-4">
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Customer Name</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">City, State</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Cases</th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-200">
+                        {unmatchedCustomers
+                          .filter(customer => customer.status === 'No close matches found')
+                          .map((customer, index) => (
+                            <tr key={index} className="bg-red-50">
+                              <td className="px-4 py-3 text-sm font-medium text-red-800">
+                                {customer.name}
+                              </td>
+                              <td className="px-4 py-3 text-sm">
+                                <span className="px-2 py-1 rounded-full bg-red-100 text-red-800 text-xs">
+                                  {customer.status}
+                                </span>
+                              </td>
+                              <td className="px-4 py-3 text-sm text-gray-900">
+                                {customer.bolData.City}, {customer.bolData.State}
+                              </td>
+                              <td className="px-4 py-3 text-sm text-gray-900">
+                                {customer.bolData.Cases}
+                              </td>
+                            </tr>
+                          ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  
+                  <div className="mt-4 p-3 bg-red-100 border border-red-300 rounded-lg">
+                    <div className="flex items-center space-x-2">
+                      <AlertTriangle className="w-4 h-4 text-red-600" />
+                      <span className="text-sm font-medium text-red-800">Manual Action Required</span>
+                    </div>
+                    <p className="text-xs text-red-700 mt-1">
+                      These customers have no close matches in the address database. Please add them manually or verify the customer names.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* BOL Comparison Success */}
+            {comparisonComplete && unmatchedCustomers.filter(c => c.status === 'No close matches found').length === 0 && 
+             unmatchedCustomers.filter(c => c.status === 'Similar matches found').length === 0 && 
+             filePreviewData.length > 0 && (
+              <div className="bg-green-50 border-2 border-green-200 rounded-xl p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-xl font-bold text-green-800 flex items-center">
+                    <CheckCircle className="w-6 h-6 mr-2" />
+                    All Customers Matched Successfully!
+                  </h2>
+                  <div className="flex items-center space-x-2">
+                    <span className="px-3 py-1 rounded-full text-sm font-medium bg-green-100 text-green-800">
+                      {filePreviewData.length} customers processed
+                    </span>
+                  </div>
+                </div>
+                
+                <div className="bg-white rounded-lg p-4">
+                  <div className="flex items-center space-x-2">
+                    <CheckCircle className="w-4 h-4 text-green-600" />
+                    <span className="text-sm font-medium text-green-800">
+                      Perfect match! All {filePreviewData.length} customers from your BOL were found in the address database.
+                    </span>
+                  </div>
+                  <p className="text-xs text-green-600 mt-1">
+                    No manual review needed. You can proceed with route optimization.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* BOL Comparison Results - Confirmed Matches */}
+            {confirmedMatches.length > 0 && (
+              <div className="bg-green-50 border-2 border-green-200 rounded-xl p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-xl font-bold text-green-800 flex items-center">
+                    <CheckCircle className="w-6 h-6 mr-2" />
+                    Confirmed Matches
+                  </h2>
+                  <div className="flex items-center space-x-2">
+                    <span className="px-3 py-1 rounded-full text-sm font-medium bg-green-100 text-green-800">
+                      {confirmedMatches.length} matches confirmed
+                    </span>
+                  </div>
+                </div>
+                
+                <div className="bg-white rounded-lg p-4">
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">BOL Name</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Database Name</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Similarity</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Location</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-200">
+                        {confirmedMatches.map((match, index) => (
+                          <tr key={index} className="bg-green-50">
+                            <td className="px-4 py-3 text-sm font-medium text-gray-900">
+                              {match.bolName}
+                            </td>
+                            <td className="px-4 py-3 text-sm font-medium text-green-800">
+                              {match.dbName}
+                            </td>
+                            <td className="px-4 py-3 text-sm">
+                              <span className="px-2 py-1 rounded-full bg-green-100 text-green-800 text-xs">
+                                {Math.round(match.similarity * 100)}%
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-sm text-gray-900">
+                              {match.dbData.city}, {match.dbData.state}
+                            </td>
+                            <td className="px-4 py-3 text-sm">
+                              {match.saved ? (
+                                <span className="px-2 py-1 rounded-full bg-green-100 text-green-800 text-xs flex items-center">
+                                  <CheckCircle className="w-3 h-3 mr-1" />
+                                  Saved
+                                </span>
+                              ) : (
+                                <span className="px-2 py-1 rounded-full bg-yellow-100 text-yellow-800 text-xs flex items-center">
+                                  <RefreshCw className="w-3 h-3 mr-1 animate-spin" />
+                                  Saving...
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  
+                  <div className="mt-4 p-3 bg-green-100 border border-green-300 rounded-lg">
+                    <div className="flex items-center space-x-2">
+                      <CheckCircle className="w-4 h-4 text-green-600" />
+                      <span className="text-sm font-medium text-green-800">Matches Confirmed</span>
+                    </div>
+                    <p className="text-xs text-green-700 mt-1">
+                      These customers have been successfully matched to the address database.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Debug: Auto-Matched Customers (Development Only) */}
+            {process.env.NODE_ENV !== 'production' && comparisonComplete && (
+              <div className="bg-blue-50 border-2 border-blue-200 rounded-xl p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-xl font-bold text-blue-800 flex items-center">
+                    <CheckCircle className="w-6 h-6 mr-2" />
+                    Auto-Matched Customers ({filePreviewData.length - unmatchedCustomers.length})
+                  </h2>
+                </div>
+                
+                <div className="bg-white rounded-lg p-4">
+                  <p className="text-sm text-blue-700 mb-3">
+                    These customers were automatically matched without user confirmation:
+                  </p>
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">BOL Name</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Database Name</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Match Type</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Similarity</th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-200">
+                        {filePreviewData
+                          .filter(bolCustomer => {
+                            const customerName = bolCustomer.Customer_Name || bolCustomer.customer_name;
+                            return !unmatchedCustomers.some(unmatched => unmatched.name === customerName);
+                          })
+                          .slice(0, 10)
+                          .map((bolCustomer, index) => {
+                            const customerName = bolCustomer.Customer_Name || bolCustomer.customer_name;
+                            const matchedAddress = addresses.find(addr => 
+                              addr.customer_name && 
+                              addr.customer_name.toLowerCase().trim() === customerName.toLowerCase().trim()
+                            );
+                            return (
+                              <tr key={index} className="bg-blue-50">
+                                <td className="px-4 py-3 text-sm font-medium text-gray-900">
+                                  {customerName}
+                                </td>
+                                <td className="px-4 py-3 text-sm font-medium text-blue-800">
+                                  {matchedAddress?.customer_name || 'N/A'}
+                                </td>
+                                <td className="px-4 py-3 text-sm">
+                                  <span className="px-2 py-1 rounded-full bg-blue-100 text-blue-800 text-xs">
+                                    Exact Match
+                                  </span>
+                                </td>
+                                <td className="px-4 py-3 text-sm">
+                                  <span className="px-2 py-1 rounded-full bg-green-100 text-green-800 text-xs">
+                                    100%
+                                  </span>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                      </tbody>
+                    </table>
+                  </div>
+                  
+                  {filePreviewData.length - unmatchedCustomers.length > 10 && (
+                    <p className="text-xs text-gray-600 mt-2">
+                      Showing first 10 of {filePreviewData.length - unmatchedCustomers.length} auto-matched customers
+                    </p>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Debug: Stored Mappings (Development Only) */}
+            {process.env.NODE_ENV !== 'production' && mappingsLoaded && Object.keys(customerNameMappings).length > 0 && (
+              <div className="bg-blue-50 border-2 border-blue-200 rounded-xl p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-xl font-bold text-blue-800 flex items-center">
+                    <Database className="w-6 h-6 mr-2" />
+                    Stored Customer Name Mappings ({Object.keys(customerNameMappings).length})
+                  </h2>
+                  <div className="flex items-center space-x-2">
+                    <button
+                      onClick={createCustomerNameMappingsTable}
+                      className="px-3 py-1 bg-blue-100 text-blue-800 rounded text-sm hover:bg-blue-200 transition-colors border border-blue-300"
+                    >
+                      Create Table
+                    </button>
+                    <button
+                      onClick={clearCustomerNameMappings}
+                      className="px-3 py-1 bg-red-100 text-red-800 rounded text-sm hover:bg-red-200 transition-colors border border-red-300"
+                    >
+                      Clear All
+                    </button>
+                  </div>
+                </div>
+                
+                <div className="bg-white rounded-lg p-4">
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">BOL Name</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Database Name</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Similarity</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Created</th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-200">
+                        {Object.entries(customerNameMappings).slice(0, 10).map(([bolName, mapping]) => (
+                          <tr key={bolName} className="bg-blue-50">
+                            <td className="px-4 py-3 text-sm font-medium text-gray-900">
+                              {bolName}
+                            </td>
+                            <td className="px-4 py-3 text-sm font-medium text-blue-800">
+                              {mapping.dbName}
+                            </td>
+                            <td className="px-4 py-3 text-sm">
+                              <span className="px-2 py-1 rounded-full bg-blue-100 text-blue-800 text-xs">
+                                {Math.round(mapping.similarity * 100)}%
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-sm text-gray-900">
+                              {mapping.createdAt ? new Date(mapping.createdAt).toLocaleDateString() : 'N/A'}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  
+                  {Object.keys(customerNameMappings).length > 10 && (
+                    <p className="text-xs text-gray-600 mt-2">
+                      Showing first 10 of {Object.keys(customerNameMappings).length} mappings
+                    </p>
+                  )}
+                </div>
+              </div>
+            )}
 
             {/* FreshOne Excel Reports */}
             <div className="bg-white rounded-xl shadow-lg p-6">
@@ -4322,295 +4195,8 @@ CREATE INDEX IF NOT EXISTS idx_customer_addresses_external_id ON customer_addres
                       <AlertCircle className="w-4 h-4 mr-2" />
                       Debug Import
                     </button>
-                    <button
-                      onClick={createCustomerNameMappingsTable}
-                      className="flex items-center px-4 py-2 bg-purple-100 text-purple-800 rounded-lg hover:bg-purple-200 transition-colors border border-purple-300"
-                    >
-                      <Database className="w-4 h-4 mr-2" />
-                      Create Mappings Table
-                    </button>
-                    <button
-                      onClick={async () => {
-                        console.log('=== TESTING MAPPINGS TABLE ===');
-                        if (!supabase) {
-                          console.error('Supabase not available');
-                          return;
-                        }
-                        
-                        try {
-                          // Test if table exists
-                          const { data, error } = await supabase
-                            .from('customer_name_mappings')
-                            .select('*')
-                            .limit(1);
-                          
-                          if (error) {
-                            console.error('Table test failed:', error);
-                            addNotification('error', 'Mappings table not found', error.message);
-                          } else {
-                            console.log('Table exists, current data:', data);
-                            addNotification('success', 'Mappings table exists', `Found ${data?.length || 0} records`);
-                          }
-                        } catch (err) {
-                          console.error('Exception testing table:', err);
-                        }
-                      }}
-                      className="flex items-center px-4 py-2 bg-blue-100 text-blue-800 rounded-lg hover:bg-blue-200 transition-colors border border-blue-300"
-                    >
-                      <CheckCircle className="w-4 h-4 mr-2" />
-                      Test Mappings Table
-                    </button>
-                    <button
-                      onClick={async () => {
-                        console.log('=== TESTING SAVE CONFIRMED MATCH ===');
-                        await saveConfirmedMatch('TEST_BOL_NAME', 'TEST_DATABASE_NAME');
-                      }}
-                      className="flex items-center px-4 py-2 bg-green-100 text-green-800 rounded-lg hover:bg-green-200 transition-colors border border-green-300"
-                    >
-                      <Save className="w-4 h-4 mr-2" />
-                      Test Save Match
-                    </button>
-                    <button
-                      onClick={async () => {
-                        console.log('=== MANUALLY RELOADING MAPPINGS ===');
-                        await loadCustomerNameMappings();
-                      }}
-                      className="flex items-center px-4 py-2 bg-yellow-100 text-yellow-800 rounded-lg hover:bg-yellow-200 transition-colors border border-yellow-300"
-                    >
-                      <RefreshCw className="w-4 h-4 mr-2" />
-                      Reload Mappings
-                    </button>
-                    <button
-                      onClick={async () => {
-                        console.log('=== COMPLETE MAPPINGS FLOW TEST ===');
-                        
-                        const testBolName = 'FLOW_TEST_BOL_' + Date.now();
-                        const testDbName = 'FLOW_TEST_DB_' + Date.now();
-                        
-                        console.log('Test mapping to save:', testBolName, '→', testDbName);
-                        
-                        // Step 1: Test table exists
-                        console.log('Step 1: Testing table exists...');
-                        const { data: tableTest, error: tableError } = await supabase
-                          .from('customer_name_mappings')
-                          .select('*')
-                          .limit(1);
-                        
-                        if (tableError) {
-                          console.error('Table test failed:', tableError);
-                          addNotification('error', 'Table test failed', tableError.message);
-                          return;
-                        }
-                        
-                        console.log('✅ Table exists');
-                        
-                        // Step 2: Save a test mapping
-                        console.log('Step 2: Saving test mapping...');
-                        await saveConfirmedMatch(testBolName, testDbName);
-                        
-                        // Step 3: Reload mappings from database (not state)
-                        console.log('Step 3: Reloading mappings from database...');
-                        const { data: reloadedData, error: reloadError } = await supabase
-                          .from('customer_name_mappings')
-                          .select('*')
-                          .eq('bol_name', testBolName);
-                        
-                        if (reloadError) {
-                          console.error('Reload test failed:', reloadError);
-                          addNotification('error', 'Reload test failed', reloadError.message);
-                          return;
-                        }
-                        
-                        console.log('Reloaded data from database:', reloadedData);
-                        
-                        // Step 4: Verify mapping was saved to database
-                        console.log('Step 4: Verifying mapping in database...');
-                        if (reloadedData && reloadedData.length > 0) {
-                          const savedMapping = reloadedData[0];
-                          console.log('✅ Found saved mapping in database:', savedMapping);
-                          
-                          if (savedMapping.bol_name === testBolName && savedMapping.database_name === testDbName) {
-                            console.log('✅ Complete flow test successful!');
-                            console.log('Saved:', savedMapping.bol_name, '→', savedMapping.database_name);
-                            console.log('Expected:', testBolName, '→', testDbName);
-                            addNotification('success', 'Complete flow test successful', 'Save → Load → Verify all working');
-                          } else {
-                            console.error('❌ Flow test failed - mapping mismatch');
-                            console.log('Expected:', testBolName, '→', testDbName);
-                            console.log('Actual:', savedMapping.bol_name, '→', savedMapping.database_name);
-                            addNotification('error', 'Flow test failed', 'Mapping mismatch');
-                          }
-                        } else {
-                          console.error('❌ Flow test failed - mapping not found in database');
-                          addNotification('error', 'Flow test failed', 'Mapping not found in database');
-                        }
-                        
-                        // Step 5: Test state update
-                        console.log('Step 5: Testing state update...');
-                        await loadCustomerNameMappings();
-                        
-                        // Use setTimeout to allow state to update
-                        setTimeout(() => {
-                          const stateMapping = customerNameMappings[testBolName.toLowerCase()];
-                          console.log('State mapping for', testBolName.toLowerCase() + ':', stateMapping);
-                          
-                          if (stateMapping === testDbName) {
-                            console.log('✅ State update successful!');
-                          } else {
-                            console.log('⚠️ State update may be delayed (this is normal)');
-                          }
-                        }, 1000);
-                      }}
-                      className="flex items-center px-4 py-2 bg-purple-100 text-purple-800 rounded-lg hover:bg-purple-200 transition-colors border border-purple-300"
-                    >
-                      <CheckCircle className="w-4 h-4 mr-2" />
-                      Test Complete Flow
-                    </button>
-                                          <button
-                        onClick={() => {
-                          console.log('=== MISSING CUSTOMERS DEBUG ===');
-                          console.log('Current state:', {
-                            missingCustomersReport: missingCustomersReport.length,
-                            similarMatchesToConfirm: similarMatchesToConfirm.length,
-                            showMissingCustomersModal,
-                            missingCustomersToAdd: missingCustomersToAdd.length,
-                            filePreviewData: filePreviewData.length,
-                            addresses: addresses.length
-                          });
-                          
-                          if (missingCustomersReport.length > 0) {
-                            console.log('Missing customers report:', missingCustomersReport);
-                            addNotification('info', 'Missing Customers Debug', 
-                              `Report: ${missingCustomersReport.length} | Similar: ${similarMatchesToConfirm.length} | Modal: ${showMissingCustomersModal}`);
-                          } else {
-                            console.log('No missing customers report found');
-                            addNotification('warning', 'No Missing Customers', 'missingCustomersReport is empty');
-                          }
-                          
-                          // Regenerate missing customers report with current data
-                          if (filePreviewData.length > 0 && addresses.length > 0) {
-                            console.log('Regenerating missing customers report...');
-                            const newReport = generateMissingCustomersReport(filePreviewData, addresses);
-                            console.log('New report generated:', newReport);
-                            
-                            setSimilarMatchesToConfirm(newReport.similarMatches);
-                            setMissingCustomersReport(newReport.trulyMissing);
-                            
-                            addNotification('info', 'Report Regenerated', 
-                              `Similar: ${newReport.similarMatches.length} | Missing: ${newReport.trulyMissing.length}`);
-                          } else {
-                            addNotification('error', 'No Data Available', 'Need BOL data and addresses to generate report');
-                          }
-                          
-                          // Force test missing customers alert
-                          if (missingCustomersReport.length === 0) {
-                            console.log('Forcing test missing customers alert...');
-                            const testMissingCustomers = [
-                              {
-                                bolCustomer: 'TEST CUSTOMER 1',
-                                suggestions: []
-                              },
-                              {
-                                bolCustomer: 'TEST CUSTOMER 2', 
-                                suggestions: []
-                              }
-                            ];
-                            setMissingCustomersReport(testMissingCustomers);
-                            addNotification('info', 'Test Alert Created', '2 test missing customers added to trigger alert');
-                          }
-                          
-                          // Debug: Show current state
-                          console.log('Current missing customers state:', {
-                            missingCustomersReport: missingCustomersReport.length,
-                            similarMatchesToConfirm: similarMatchesToConfirm.length,
-                            showMissingCustomersModal,
-                            missingCustomersToAdd: missingCustomersToAdd.length
-                          });
-                          
-                          // Test modal
-                          setMissingCustomersToAdd([{
-                            name: 'TEST CUSTOMER',
-                            address: '123 Test St',
-                            city: 'Test City',
-                            state: 'FL',
-                            zipCode: '12345',
-                            phone: '555-1234',
-                            instructions: 'Test instructions'
-                          }]);
-                          setShowMissingCustomersModal(true);
-                          console.log('Modal state set to true');
-                        }}
-                        className="flex items-center px-4 py-2 bg-orange-100 text-orange-800 rounded-lg hover:bg-orange-200 transition-colors border border-orange-300"
-                      >
-                        <AlertCircle className="w-4 h-4 mr-2" />
-                        Debug Missing Customers
-                      </button>
-                      <button
-                        onClick={() => {
-                          console.log('Testing missing customers alert...');
-                          const testMissing = [
-                            { bolCustomer: 'TEST CUSTOMER 1', suggestions: [] },
-                            { bolCustomer: 'TEST CUSTOMER 2', suggestions: [] }
-                          ];
-                          setMissingCustomersReport(testMissing);
-                          addNotification('info', 'Test Alert', 'Missing customers alert should now appear');
-                        }}
-                        className="flex items-center px-4 py-2 bg-red-100 text-red-800 rounded-lg hover:bg-red-200 transition-colors border border-red-300"
-                      >
-                        <AlertTriangle className="w-4 h-4 mr-2" />
-                        Test Alert
-                      </button>
-                      <button
-                        onClick={() => {
-                          console.log('=== COMPREHENSIVE FLOW TEST ===');
-                          
-                          // Simulate BOL processing with 2 unmatched customers
-                          const testBOLData = [
-                            { customer_name: 'MATCHED CUSTOMER 1' },
-                            { customer_name: 'MATCHED CUSTOMER 2' },
-                            { customer_name: 'UNMATCHED CUSTOMER 1' },
-                            { customer_name: 'UNMATCHED CUSTOMER 2' }
-                          ];
-                          
-                          // Simulate processed data with address lookups
-                          const testProcessedData = [
-                            { Customer_Name: 'MATCHED CUSTOMER 1', Address_Source: 'Database Lookup' },
-                            { Customer_Name: 'MATCHED CUSTOMER 2', Address_Source: 'Database Lookup' },
-                            { Customer_Name: 'UNMATCHED CUSTOMER 1', Address_Source: null },
-                            { Customer_Name: 'UNMATCHED CUSTOMER 2', Address_Source: null }
-                          ];
-                          
-                          // Extract unmatched customers (same logic as BOL processing)
-                          const unmatchedCustomers = testProcessedData
-                            .filter(row => row.Customer_Name && row.Customer_Name.trim() && row.Address_Source !== 'Database Lookup')
-                            .map(row => row.Customer_Name.trim());
-                          
-                          console.log('Test unmatched customers:', unmatchedCustomers);
-                          
-                          // Create missing customers report
-                          const testMissingReport = {
-                            similarMatches: [],
-                            trulyMissing: unmatchedCustomers.map(customerName => ({
-                              bolCustomer: customerName,
-                              suggestions: []
-                            }))
-                          };
-                          
-                          console.log('Test missing report:', testMissingReport);
-                          
-                          // Set state
-                          setMissingCustomersReport(testMissingReport.trulyMissing);
-                          setSimilarMatchesToConfirm(testMissingReport.similarMatches);
-                          
-                          console.log('State set - missing customers should appear in alert');
-                          addNotification('info', 'Comprehensive Test Complete', 
-                            `2 test unmatched customers set. Alert should appear with ${testMissingReport.trulyMissing.length} missing customers.`);
-                        }}
-                        className="flex items-center px-4 py-2 bg-purple-100 text-purple-800 rounded-lg hover:bg-purple-200 transition-colors border border-purple-300"
-                      >
-                        <TestTube className="w-4 h-4 mr-2" />
-                        Test Complete Flow
-                      </button>
+
+
                     <button
                       onClick={recoverMissingAddresses}
                       disabled={!addressPreviewData.length}
@@ -4634,10 +4220,25 @@ CREATE INDEX IF NOT EXISTS idx_customer_addresses_external_id ON customer_addres
                 </div>
                 <div className="p-4 bg-gray-50 rounded-lg">
                   <h4 className="font-medium text-gray-900 mb-2">NextBillion.ai API</h4>
-                  <p className="text-sm text-gray-600 mb-2">
-                    Status: {NEXTBILLION_API_KEY !== '[YOUR_NEXTBILLION_API_KEY_HERE]' ? '✅ Configured' : '⏳ Not configured'}
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-sm text-gray-600">
+                      Status: {nextBillionStatus}
+                    </p>
+                    <button
+                      onClick={testNextBillionConnection}
+                      disabled={nextBillionTesting}
+                      className="flex items-center px-3 py-1 bg-blue-100 text-blue-800 rounded text-xs hover:bg-blue-200 transition-colors border border-blue-300 disabled:bg-gray-100 disabled:text-gray-400"
+                    >
+                      {nextBillionTesting ? <RefreshCw className="w-3 h-3 mr-1 animate-spin" /> : <Wifi className="w-3 h-3 mr-1" />}
+                      Test
+                    </button>
+                  </div>
+                  <p className="text-xs text-gray-500">
+                    {nextBillionStatus === '✅ Connected' ? 'Ready for geocoding & route optimization' : 
+                     nextBillionStatus === '❌ Not Configured' ? 'API key not configured' :
+                     nextBillionStatus === 'Testing...' ? 'Testing connection...' :
+                     'Connection failed - check API key'}
                   </p>
-                  <p className="text-xs text-gray-500">Ready for route optimization</p>
                 </div>
               </div>
             </div>
@@ -4729,35 +4330,7 @@ CREATE INDEX IF NOT EXISTS idx_customer_addresses_external_id ON customer_addres
                     <p>Addresses Loading: {addressesLoading ? 'Yes' : 'No'}</p>
                     <p>Address Count: {addresses.length}</p>
                     <p>Supabase Client: {supabase ? 'Created' : 'Not Created'}</p>
-                    <p>Customer Mappings: {Object.keys(customerNameMappings).length} loaded</p>
-                    <p>Missing Customers Report: {missingCustomersReport.length} items</p>
-                    <p>Similar Matches: {similarMatchesToConfirm.length} items</p>
-                    <p>Show Modal: {showMissingCustomersModal ? 'Yes' : 'No'}</p>
-                    <p>Missing Customers To Add: {missingCustomersToAdd.length} items</p>
-                    {Object.keys(customerNameMappings).length > 0 && (
-                      <details className="mt-2">
-                        <summary className="cursor-pointer text-blue-600">Show Mappings</summary>
-                        <div className="mt-1 space-y-1">
-                          {Object.entries(customerNameMappings).map(([bolName, dbName]) => (
-                            <div key={bolName} className="text-xs">
-                              "{bolName}" → "{dbName}"
-                            </div>
-                          ))}
-                        </div>
-                      </details>
-                    )}
-                    {missingCustomersReport.length > 0 && (
-                      <details className="mt-2">
-                        <summary className="cursor-pointer text-red-600">Show Missing Customers</summary>
-                        <div className="mt-1 space-y-1">
-                          {missingCustomersReport.map((item, idx) => (
-                            <div key={idx} className="text-xs text-red-600">
-                              "{item.bolCustomer}"
-                            </div>
-                          ))}
-                        </div>
-                      </details>
-                    )}
+
                   </div>
                 </div>
               </div>
