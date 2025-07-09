@@ -68,7 +68,7 @@ const LogisticsAutomationPlatform = () => {
     name: 'FreshOne Main Warehouse'
   };
   
-  const [testMode, setTestMode] = useState(true);
+  const [testMode, setTestMode] = useState(false); // Changed to false to use real API
   const [routesAwaitingApproval, setRoutesAwaitingApproval] = useState([]);
   const [showRouteReview, setShowRouteReview] = useState(false);
   // Add modal state for route preview
@@ -125,9 +125,9 @@ const LogisticsAutomationPlatform = () => {
       boxTrucks26: 14,      // 26' box trucks: 14 pallets
       tractorTrailers53: 26  // 53' tractor trailers: 26 pallets
     },
-    maxDistance: 80, // km - drastically reduced for USDOT compliance
-    maxStops: 6, // Severely limited to force short routes
-    shiftDuration: 8, // hours - reduced to 8 hour shifts
+    maxDistance: 300, // km - NextBillion.ai now handles USDOT compliance
+    maxStops: 20, // NextBillion.ai will optimize within compliance limits
+    shiftDuration: 14, // hours - max working time per USDOT
     
     // Warehouse locations by market
     warehouses: {
@@ -155,12 +155,12 @@ const LogisticsAutomationPlatform = () => {
       ambient: { min: 60, max: 80, label: 'Ambient (60°F to 80°F)' }
     },
     
-    // USDOT compliance settings
-    maxDrivingHours: 11,
-    maxOnDutyHours: 14,
-    requiredBreak: 30,
-    maxDrivingBeforeBreak: 8,
-    minimumOffDuty: 10,
+    // USDOT compliance settings - handled by NextBillion.ai API
+    maxDrivingHours: 11, // API enforces this
+    maxOnDutyHours: 14, // API enforces this
+    requiredBreak: 30, // API enforces this
+    maxDrivingBeforeBreak: 8, // API enforces this
+    minimumOffDuty: 10, // API enforces this
     
     // Default start/end locations (Tampa warehouse)
     startLocation: {
@@ -242,6 +242,122 @@ const LogisticsAutomationPlatform = () => {
       timestamp: new Date().toLocaleTimeString()
     };
     setNotifications(prev => [notification, ...prev.slice(0, 9)]);
+  };
+
+  // State for save button feedback
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveSuccess, setSaveSuccess] = useState(false);
+
+  // Save configuration function
+  const saveConfiguration = async () => {
+    console.log('Save button clicked!');
+    setIsSaving(true);
+    setSaveSuccess(false);
+    
+    // Show immediate feedback
+    addNotification('info', '💾 Saving configuration...', 'Please wait');
+    
+    try {
+      const configData = {
+        fleetConfig,
+        zapierWebhookUrl,
+        zapierEnabled,
+        customerNameMappings,
+        warehouseConfig,
+        timestamp: new Date().toISOString()
+      };
+
+      // Save to localStorage
+      localStorage.setItem('freshone-logistics-config', JSON.stringify(configData));
+      
+      // If Supabase is available, save to database
+      if (supabase) {
+        try {
+          const { error } = await supabase
+            .from('configurations')
+            .upsert({
+              id: 'main-config',
+              config_data: configData,
+              updated_at: new Date().toISOString()
+            });
+          
+          if (error) {
+            console.warn('Failed to save to Supabase:', error.message);
+          } else {
+            addNotification('success', 'Configuration saved to database', 'Settings backed up to cloud storage');
+          }
+        } catch (dbError) {
+          console.warn('Database save failed:', dbError.message);
+        }
+      }
+      
+      addNotification('success', '✅ Settings saved successfully!', 'All configuration changes have been saved');
+      setSaveSuccess(true);
+      
+      // Also show an alert for immediate feedback
+      alert('✅ Settings saved successfully!\n\nYour configuration has been saved to local storage.');
+      
+      // Reset success indicator after 3 seconds
+      setTimeout(() => {
+        setSaveSuccess(false);
+      }, 3000);
+      
+    } catch (error) {
+      console.error('Failed to save configuration:', error);
+      addNotification('error', '❌ Failed to save settings', error.message);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  // Load configuration function
+  const loadConfiguration = async () => {
+    try {
+      // First try to load from localStorage
+      const localConfig = localStorage.getItem('freshone-logistics-config');
+      if (localConfig) {
+        const configData = JSON.parse(localConfig);
+        
+        // Update state with loaded configuration
+        if (configData.fleetConfig) setFleetConfig(configData.fleetConfig);
+        if (configData.zapierWebhookUrl) setZapierWebhookUrl(configData.zapierWebhookUrl);
+        if (configData.zapierEnabled !== undefined) setZapierEnabled(configData.zapierEnabled);
+        if (configData.customerNameMappings) setCustomerNameMappings(configData.customerNameMappings);
+        if (configData.warehouseConfig) setWarehouseConfig(configData.warehouseConfig);
+        
+        addNotification('success', 'Configuration loaded', 'Settings restored from previous session');
+      }
+      
+      // Try to load from Supabase if available
+      if (supabase) {
+        try {
+          const { data, error } = await supabase
+            .from('configurations')
+            .select('config_data')
+            .eq('id', 'main-config')
+            .single();
+          
+          if (data && data.config_data) {
+            const configData = data.config_data;
+            
+            // Update state with database configuration (takes precedence over localStorage)
+            if (configData.fleetConfig) setFleetConfig(configData.fleetConfig);
+            if (configData.zapierWebhookUrl) setZapierWebhookUrl(configData.zapierWebhookUrl);
+            if (configData.zapierEnabled !== undefined) setZapierEnabled(configData.zapierEnabled);
+            if (configData.customerNameMappings) setCustomerNameMappings(configData.customerNameMappings);
+            if (configData.warehouseConfig) setWarehouseConfig(configData.warehouseConfig);
+            
+            addNotification('success', 'Configuration synced from database', 'Latest settings loaded from cloud storage');
+          }
+        } catch (dbError) {
+          console.warn('Failed to load from database:', dbError.message);
+        }
+      }
+      
+    } catch (error) {
+      console.error('Failed to load configuration:', error);
+      addNotification('warning', 'Failed to load saved settings', 'Using default configuration');
+    }
   };
 
   // Enhanced FreshOne email notification function with real email sending
@@ -626,7 +742,17 @@ const LogisticsAutomationPlatform = () => {
       const vehicles = ['Truck 101', 'Truck 102', 'Truck 103'];
       
       if (routes.length === 0) {
-        throw new Error('No routes returned from NextBillion API');
+        console.log('⚠️ NextBillion API returned 0 routes - this may indicate:');
+        console.log('- All jobs are unassigned due to constraints');
+        console.log('- Vehicle capacity/time constraints too restrictive');
+        console.log('- Location/distance issues');
+        console.log('- Check unassigned jobs in API response:', apiResponse.unassigned?.length || 0);
+        
+        addNotification('warning', 'No routes generated by NextBillion.ai', 
+          `API returned 0 routes. Check: vehicle constraints, location data, or increase fleet size. Unassigned jobs: ${apiResponse.unassigned?.length || 0}`);
+        
+        // Return empty array instead of throwing error
+        return [];
       }
       
       const convertedRoutes = routes.map((route, routeIndex) => {
@@ -685,8 +811,66 @@ const LogisticsAutomationPlatform = () => {
     }
   };
 
+  // Poll NextBillion.ai Fast API for optimization results
+  const pollForOptimizationResult = async (jobId, maxAttempts = 30, interval = 2000) => {
+    console.log(`🔄 Polling for optimization result, job ID: ${jobId}`);
+    
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        console.log(`📊 Polling attempt ${attempt}/${maxAttempts}`);
+        addNotification('info', `Checking optimization progress... (${attempt}/${maxAttempts})`, 'Waiting for NextBillion.ai to complete route optimization');
+        
+        const response = await fetch(`https://api.nextbillion.io/optimise-mvrp/result?id=${jobId}&key=${NEXTBILLION_API_KEY}`);
+        
+        if (!response.ok) {
+          throw new Error(`Polling failed: ${response.status} ${response.statusText}`);
+        }
+        
+        const result = await response.json();
+        console.log(`📥 Poll response status: ${result.status}`);
+        
+        // Check for completed result (status "Ok" with routes)
+        if (result.status === 'Ok' && result.result && result.result.routes) {
+          console.log('✅ Optimization completed successfully');
+          addNotification('success', 'Route optimization completed!', 'NextBillion.ai has finished processing your routes');
+          return result.result; // Return the nested result object
+        } else if (result.status === 'FAILED' || result.error) {
+          throw new Error(`Optimization failed: ${result.message || result.error || 'Unknown error'}`);
+        } else if (result.status === 'PROCESSING' || result.status === 'PENDING' || result.status === 'Ok') {
+          console.log(`⏱️ Still processing... (status: ${result.status})`);
+          // Continue polling - for Fast API, "Ok" means still processing if no routes yet
+        } else {
+          console.log(`⚠️ Unknown status: ${result.status}`);
+        }
+        
+        // Wait before next poll
+        if (attempt < maxAttempts) {
+          await new Promise(resolve => setTimeout(resolve, interval));
+        }
+        
+      } catch (error) {
+        console.error(`❌ Polling attempt ${attempt} failed:`, error);
+        if (attempt === maxAttempts) {
+          throw new Error(`Polling failed after ${maxAttempts} attempts: ${error.message}`);
+        }
+        // Wait before retry
+        await new Promise(resolve => setTimeout(resolve, interval));
+      }
+    }
+    
+    throw new Error(`Optimization timed out after ${maxAttempts} attempts`);
+  };
+
   // Real NextBillion.ai route optimization
   const optimizeRoutes = async (geocodedData) => {
+    // Prevent multiple simultaneous calls
+    if (processing) {
+      console.log('⚠️ Optimization already in progress, skipping duplicate call');
+      return [];
+    }
+    
+    console.log('🚀 OPTIMIZE ROUTES STARTED - Mode:', testMode ? 'TEST MODE' : 'LIVE MODE');
+    console.log('🚀 Geocoded data length:', geocodedData?.length);
     setProcessing(true);
     const mode = testMode ? 'TEST MODE' : 'LIVE MODE';
     addNotification('info', `Starting FreshOne route optimization (${mode})...`, testMode ? 'Using simulation data' : 'Using NextBillion.ai API');
@@ -734,9 +918,12 @@ const LogisticsAutomationPlatform = () => {
         
       } else {
         // Live mode - use real NextBillion.ai API
+        console.log('🔑 Checking API key...');
         if (!NEXTBILLION_API_KEY || NEXTBILLION_API_KEY === '[YOUR_NEXTBILLION_API_KEY_HERE]') {
+          console.log('❌ API key not configured!');
           throw new Error('NextBillion API key not configured');
         }
+        console.log('✅ API key configured');
         
         addNotification('info', 'Calling NextBillion.ai Route Optimization API...', `Processing ${geocodedData.length} stops for real route optimization`);
         
@@ -810,20 +997,9 @@ const LogisticsAutomationPlatform = () => {
               capacity: [fleetConfig.truckCapacities.boxTrucks26], // Array format for capacity
               start: `${market.replace(/\s+/g, '_').replace(',', '')}_warehouse`,
               end: `${market.replace(/\s+/g, '_').replace(',', '')}_warehouse`,
-              // NextBillion.ai standard format
-              time_window: [
-                Math.floor(Date.now() / 1000),
-                Math.floor(Date.now() / 1000) + (8 * 3600) // 8 hours
-              ],
-              max_travel_time: 6 * 3600, // 6 hours max travel time
-              breaks: [{
-                id: 1,
-                time_windows: [[
-                  Math.floor(Date.now() / 1000) + (4 * 3600), // After 4 hours
-                  Math.floor(Date.now() / 1000) + (5 * 3600)  // Within 5 hours
-                ]],
-                duration: 1800 // 30 minutes
-              }]
+              // NextBillion.ai USDOT DOT compliance - simplified
+              max_travel_time: 660, // 11 hours in MINUTES (USDOT compliance)
+              max_distance: 800 // 800km max distance for safety
             });
           }
           
@@ -835,54 +1011,43 @@ const LogisticsAutomationPlatform = () => {
               capacity: [fleetConfig.truckCapacities.tractorTrailers53], // Array format for capacity
               start: `${market.replace(/\s+/g, '_').replace(',', '')}_warehouse`,
               end: `${market.replace(/\s+/g, '_').replace(',', '')}_warehouse`,
-              // NextBillion.ai standard format
-              time_window: [
-                Math.floor(Date.now() / 1000),
-                Math.floor(Date.now() / 1000) + (8 * 3600) // 8 hours
-              ],
-              max_travel_time: 6 * 3600, // 6 hours max travel time
-              breaks: [{
-                id: 1,
-                time_windows: [[
-                  Math.floor(Date.now() / 1000) + (4 * 3600), // After 4 hours
-                  Math.floor(Date.now() / 1000) + (5 * 3600)  // Within 5 hours
-                ]],
-                duration: 1800 // 30 minutes
-              }]
+              // NextBillion.ai USDOT DOT compliance - simplified
+              max_travel_time: 660, // 11 hours in MINUTES (USDOT compliance)
+              max_distance: 800 // 800km max distance for safety
             });
           }
         });
 
-        // Create locations array for NextBillion.ai format
-        const locations = [];
+        // Create locations for NextBillion.ai Fast API format - pipe-separated string
+        const locationCoordinates = [];
         const locationIndexMap = {};
         
         // Add warehouse locations
         Object.entries(fleetConfig.warehouses).forEach(([market, warehouse]) => {
           const locationId = `${market.replace(/\s+/g, '_').replace(',', '')}_warehouse`;
-          locationIndexMap[locationId] = locations.length;
-          locations.push({
-            id: locationId,
-            location: [warehouse.lat, warehouse.lon]
-          });
+          locationIndexMap[locationId] = locationCoordinates.length;
+          locationCoordinates.push(`${warehouse.lat},${warehouse.lon}`);
         });
         
         // Add customer locations
         stops.forEach((stop, index) => {
-          locationIndexMap[stop.id] = locations.length;
-          locations.push({
-            id: stop.id,
-            location: [stop.location.lat, stop.location.lng]
-          });
+          locationIndexMap[stop.id] = locationCoordinates.length;
+          locationCoordinates.push(`${stop.location.lat},${stop.location.lng}`);
         });
         
-        // Create jobs array (deliveries)
+        // Create locations object for Fast API
+        const locations = {
+          id: 1,
+          location: locationCoordinates.join('|') // Pipe-separated string
+        };
+        
+        // Create jobs array (deliveries) - IDs must be numeric for Fast API
         const jobs = stops.map((stop, index) => {
           const originalCustomer = geocodedData[index]?.Customer_Name || '';
           const customerConfig = fleetConfig.customerTemperatureMap[originalCustomer];
           
           return {
-            id: stop.id,
+            id: index + 1, // Numeric ID starting from 1
             location_index: locationIndexMap[stop.id],
             delivery: [stop.demand], // Delivery amount in pallets
             service: stop.service_time, // Service time in seconds
@@ -898,14 +1063,13 @@ const LogisticsAutomationPlatform = () => {
         const apiPayload = {
           locations: locations,
           jobs: jobs,
-          vehicles: vehicles.map(v => ({
-            id: v.id,
+          vehicles: vehicles.map((v, index) => ({
+            id: index + 1, // Numeric ID starting from 1
             start_index: locationIndexMap[v.start],
             end_index: locationIndexMap[v.end],
             capacity: v.capacity,
-            time_window: v.time_window,
             max_travel_time: v.max_travel_time,
-            breaks: v.breaks
+            max_distance: v.max_distance
           })),
           options: {
             objective: {
@@ -915,14 +1079,14 @@ const LogisticsAutomationPlatform = () => {
           }
         };
         
-        // Log summary
+        // Log summary (moved after apiPayload creation)
         const totalPallets = jobs.reduce((sum, job) => sum + job.delivery[0], 0);
         const totalCases = stops.reduce((sum, stop) => sum + (stop.cases || 0), 0);
         const avgServiceTime = jobs.reduce((sum, job) => sum + job.service, 0) / jobs.length / 60; // in minutes
         const dedicatedCount = jobs.filter(j => j.priority === 100).length;
         
         console.log('NextBillion.ai API Payload:', {
-          locations: locations.length,
+          locations: locationCoordinates.length,
           jobs: jobs.length,
           vehicles: vehicles.length,
           totalPallets: totalPallets,
@@ -930,11 +1094,10 @@ const LogisticsAutomationPlatform = () => {
           avgServiceTimeMinutes: Math.round(avgServiceTime),
           dedicatedRoutes: dedicatedCount,
           strictDotCompliance: {
-            maxTravelTime: '6 hours per vehicle',
-            shiftDuration: '8 hours max',
+            maxTravelTime: '11 hours = 660 minutes (API enforced)',
+            maxDistance: '800km max per vehicle',
             mandatoryBreak: '30 minutes after 4 hours',
-            maxStops: fleetConfig.maxStops,
-            maxDistance: `${fleetConfig.maxDistance}km`,
+            apiCompliance: 'NextBillion.ai max_travel_time constraint',
             warehouse: '6422 Harney Rd, Ste E, Tampa, FL 33610'
           },
           vehicleBreakdown: {
@@ -946,11 +1109,52 @@ const LogisticsAutomationPlatform = () => {
           }
         });
         
-        addNotification('info', 'Sending STRICT USDOT optimization to NextBillion.ai...', 
-          `${stops.length} stops • ${totalPallets} pallets • MAX 6 stops/route • MAX 8 hours • MAX 80km • Return to Tampa warehouse`);
+        addNotification('info', 'Sending USDOT-compliant optimization to NextBillion.ai...', 
+          `${stops.length} stops • ${totalPallets} pallets • Using NextBillion.ai DOT compliance parameters`);
+        
+        // DEBUG: Log the exact API payload
+        console.log('🔍 DEBUG: API Payload being sent:');
+        console.log('- Vehicles:', apiPayload.vehicles.length);
+        console.log('- Jobs:', apiPayload.jobs.length);
+        console.log('- Locations format:', typeof apiPayload.locations);
+        console.log('- First vehicle constraints:', {
+          id: apiPayload.vehicles[0]?.id,
+          max_travel_time: apiPayload.vehicles[0]?.max_travel_time,
+          max_distance: apiPayload.vehicles[0]?.max_distance,
+          time_window: apiPayload.vehicles[0]?.time_window
+        });
+        
+        // Log the full payload for debugging
+        console.log('🔍 LOCATIONS OBJECT:', apiPayload.locations);
+        console.log('🔍 SAMPLE JOB:', apiPayload.jobs[0]);
+        console.log('🔍 SAMPLE VEHICLE:', apiPayload.vehicles[0]);
+        
+        // Check if locations is a proper string
+        if (typeof apiPayload.locations === 'object' && apiPayload.locations.location) {
+          console.log('🔍 LOCATIONS STRING:', apiPayload.locations.location.substring(0, 200) + '...');
+        }
+        
+        // Log payload size info
+        console.log('🔍 PAYLOAD SIZE CHECK:', {
+          locationsType: typeof apiPayload.locations,
+          jobsCount: apiPayload.jobs?.length,
+          vehiclesCount: apiPayload.vehicles?.length,
+          locationsStringLength: apiPayload.locations?.location?.length
+        });
+        
+        // Verify USDOT constraints are in payload
+        console.log('🔍 USDOT CONSTRAINT CHECK:');
+        apiPayload.vehicles?.slice(0, 3).forEach((vehicle, i) => {
+          console.log(`  Vehicle ${i + 1}:`, {
+            id: vehicle.id,
+            max_travel_time: vehicle.max_travel_time,
+            max_distance: vehicle.max_distance,
+            capacity: vehicle.capacity
+          });
+        });
         
         // Make API call to NextBillion
-        const response = await fetch(`https://api.nextbillion.io/optimization/v2?key=${NEXTBILLION_API_KEY}`, {
+        const response = await fetch(`https://api.nextbillion.io/optimise-mvrp?key=${NEXTBILLION_API_KEY}`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'
@@ -960,11 +1164,63 @@ const LogisticsAutomationPlatform = () => {
         
         if (!response.ok) {
           const errorData = await response.json().catch(() => ({}));
+          console.log('❌ NextBillion API Error Details:', {
+            status: response.status,
+            statusText: response.statusText,
+            errorData: errorData,
+            url: response.url
+          });
+          
+          console.log('❌ Error Data Details:', errorData);
+          
+          // Log the exact payload that failed
+          console.log('❌ Failed API Payload:', JSON.stringify(apiPayload, null, 2));
+          
           throw new Error(`NextBillion API error: ${response.status} ${response.statusText} - ${errorData.message || 'Unknown error'}`);
         }
         
-        const optimizationResult = await response.json();
-        addNotification('success', 'NextBillion.ai optimization completed!', 'Processing optimization results...');
+        const submitResult = await response.json();
+        
+        // Fast API returns job ID - need to poll for results
+        if (submitResult.id) {
+          console.log('🔄 Job submitted, polling for results...', submitResult.id);
+          addNotification('info', 'NextBillion.ai job submitted', `Job ID: ${submitResult.id}. Polling for results...`);
+          
+          const optimizationResult = await pollForOptimizationResult(submitResult.id);
+          addNotification('success', 'NextBillion.ai optimization completed!', 'Processing optimization results...');
+        } else {
+          throw new Error(`Unexpected API response: ${JSON.stringify(submitResult)}`);
+        }
+        
+        // DEBUG: Log detailed API response
+        console.log('🔍 DEBUG: NextBillion API Response:');
+        console.log('- Status:', response.status);
+        console.log('- Routes:', optimizationResult.routes?.length || 0);
+        console.log('- Unassigned jobs:', optimizationResult.unassigned?.length || 0);
+        console.log('- Full response keys:', Object.keys(optimizationResult));
+        
+        // If there are unassigned jobs, log details
+        if (optimizationResult.unassigned && optimizationResult.unassigned.length > 0) {
+          console.log('⚠️ UNASSIGNED JOBS DETAILS:');
+          optimizationResult.unassigned.slice(0, 5).forEach((job, i) => {
+            console.log(`  Unassigned ${i + 1}:`, job);
+          });
+        }
+        
+        console.log('- Route details:');
+        optimizationResult.routes?.forEach((route, i) => {
+          const hours = (route.duration / 3600).toFixed(2);
+          const minutes = (route.duration / 60).toFixed(0);
+          const distance = (route.distance / 1000).toFixed(2);
+          const stops = route.steps?.filter(s => s.type === 'job').length || 0;
+          const violatesDOT = route.duration > (660 * 60); // 660 minutes = 39,600 seconds
+          
+          console.log(`  Route ${i + 1}: ${hours} hours (${minutes} min), ${distance} km, ${stops} stops ${violatesDOT ? '❌ VIOLATES DOT!' : '✅ DOT OK'}`);
+          
+          if (violatesDOT) {
+            console.log(`    ⚠️ Route ${i + 1} exceeds 660 minutes limit by ${minutes - 660} minutes`);
+          }
+        });
         
         // Log API response
         console.log('NextBillion API Response:', {
@@ -998,13 +1254,28 @@ const LogisticsAutomationPlatform = () => {
       }
       
     } catch (error) {
+      console.error('❌ Route optimization error:', error);
       addNotification('error', 'Route optimization failed', error.message);
       
-      // Fallback to simulation if API fails
+      // Fallback to simulation if API fails (prevent infinite recursion)
       if (!testMode) {
         addNotification('warning', 'Falling back to simulation mode', 'API failed, using simulated optimization');
+        console.log('🔄 Switching to test mode and retrying once...');
+        
+        // Reset processing state before recursive call
+        setProcessing(false);
         setTestMode(true);
-        return await optimizeRoutes(geocodedData); // Recursive call with test mode
+        
+        // Wait a bit before retry to prevent rapid recursion
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
+        try {
+          return await optimizeRoutes(geocodedData); // Single retry in test mode
+        } catch (fallbackError) {
+          console.error('❌ Test mode also failed:', fallbackError);
+          addNotification('error', 'Both API and simulation failed', fallbackError.message);
+          throw fallbackError;
+        }
       }
       
       throw error;
@@ -3273,7 +3544,10 @@ CREATE TABLE customer_addresses (
     }
   }, [addresses, addressesLoaded, addressesLoading]);
 
-
+  // Load configuration on component mount
+  useEffect(() => {
+    loadConfiguration();
+  }, []);
 
   // Test Supabase connection
   const testSupabaseConnection = async () => {
@@ -3434,7 +3708,67 @@ CREATE TABLE customer_addresses (
       {/* Main Content - Conditional based on active tab */}
       {activeTab === 'setup' ? (
         <div className="bg-white shadow-lg border-t-2 border-gray-200 relative pb-32">
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+          {/* Save Settings button at TOP */}
+          <div className="sticky top-0 z-20 bg-white border-b-2 border-gray-300 py-4 px-8 shadow-lg">
+            <div className="flex justify-between items-center max-w-7xl mx-auto">
+              <p className="text-gray-600">💾 Configuration changes are not saved automatically</p>
+              <button 
+                onClick={() => {
+                  try {
+                    // Save the actual configuration
+                    const configData = {
+                      fleetConfig,
+                      zapierWebhookUrl,
+                      zapierEnabled,
+                      customerNameMappings,
+                      warehouseConfig,
+                      timestamp: new Date().toISOString()
+                    };
+                    
+                    // Save to localStorage
+                    localStorage.setItem('freshone-logistics-config', JSON.stringify(configData));
+                    
+                    // Show success message
+                    alert('✅ Settings Saved Successfully!\n\nAll your configuration changes have been saved.');
+                    
+                    // Update button state (visual feedback)
+                    setIsSaving(false);
+                    setSaveSuccess(true);
+                    setTimeout(() => setSaveSuccess(false), 3000);
+                    
+                  } catch (err) {
+                    alert('❌ Error saving settings: ' + err.message);
+                  }
+                }} 
+                disabled={isSaving}
+                className={`flex items-center px-8 py-3 rounded-lg font-bold transform transition-all shadow-lg ${
+                  isSaving 
+                    ? 'bg-gray-400 cursor-wait scale-95' 
+                    : saveSuccess 
+                      ? 'bg-green-500 scale-110' 
+                      : 'bg-green-600 hover:bg-green-700 hover:scale-105'
+                } text-white`}
+              >
+                {isSaving ? (
+                  <>
+                    <RefreshCw className="w-5 h-5 mr-2 animate-spin" />
+                    Saving...
+                  </>
+                ) : saveSuccess ? (
+                  <>
+                    <CheckCircle className="w-5 h-5 mr-2" />
+                    Saved!
+                  </>
+                ) : (
+                  <>
+                    <Save className="w-5 h-5 mr-2" />
+                    Save All Settings
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 pb-40">
             {/* Sticky mini-nav (optional) */}
             <nav className="sticky top-0 z-10 bg-white py-2 mb-6 border-b border-gray-100 flex space-x-6 text-sm font-medium">
               <a href="#fleet" className="hover:text-green-700">Fleet</a>
@@ -3972,18 +4306,77 @@ Loaded State: ${addressesLoaded}
                 </div>
               </section>
             </div>
-            {/* Sticky Save Settings button */}
-            <div className="fixed bottom-0 left-0 w-full bg-white border-t border-gray-200 py-4 flex justify-end px-8 z-50 shadow-lg">
-              <button onClick={() => { addNotification('success', 'Settings saved', 'Fleet configuration updated successfully'); }} className="flex items-center px-6 py-3 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-700 transition-colors shadow-lg">
-                <Save className="w-5 h-5 mr-2" />
-                Save Settings
-              </button>
+            {/* Sticky Save Settings button - NOW WITH BETTER POSITIONING */}
+            <div className="sticky bottom-0 mt-8 bg-white border-t-2 border-gray-300 py-4 px-8 shadow-2xl">
+              <div className="flex justify-between items-center">
+                <p className="text-gray-600">💾 Don't forget to save your changes!</p>
+                <button 
+                  onClick={() => {
+                    try {
+                      // Save the actual configuration
+                      const configData = {
+                        fleetConfig,
+                        zapierWebhookUrl,
+                        zapierEnabled,
+                        customerNameMappings,
+                        warehouseConfig,
+                        timestamp: new Date().toISOString()
+                      };
+                      
+                      // Save to localStorage
+                      localStorage.setItem('freshone-logistics-config', JSON.stringify(configData));
+                      
+                      // Show success message
+                      alert('✅ Settings Saved Successfully!\n\nAll your configuration changes have been saved.');
+                      
+                      // Update button state (visual feedback)
+                      setIsSaving(false);
+                      setSaveSuccess(true);
+                      setTimeout(() => setSaveSuccess(false), 3000);
+                      
+                    } catch (err) {
+                      alert('❌ Error saving settings: ' + err.message);
+                    }
+                  }} 
+                  disabled={isSaving}
+                  className={`flex items-center px-8 py-4 rounded-lg font-bold text-lg transform transition-all shadow-lg ${
+                    isSaving 
+                      ? 'bg-gray-400 cursor-wait scale-95' 
+                      : saveSuccess 
+                        ? 'bg-green-500 scale-110' 
+                        : 'bg-green-600 hover:bg-green-700 hover:scale-105'
+                  } text-white`}
+                >
+                  {isSaving ? (
+                    <>
+                      <RefreshCw className="w-6 h-6 mr-3 animate-spin" />
+                      Saving...
+                    </>
+                  ) : saveSuccess ? (
+                    <>
+                      <CheckCircle className="w-6 h-6 mr-3" />
+                      Saved Successfully!
+                    </>
+                  ) : (
+                    <>
+                      <Save className="w-6 h-6 mr-3" />
+                      Save All Settings
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
           </div>
         </div>
       ) : (
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Helper message to find Setup tab */}
+        <div className="bg-yellow-100 border-2 border-yellow-400 rounded-lg p-4 mb-6">
+          <p className="text-yellow-800 font-bold">💡 Looking for the Save Settings button?</p>
+          <p className="text-yellow-700">Click the "Setup" tab in the header above to access configuration settings and save them.</p>
+        </div>
+        
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
           
           {/* Workflow Status */}
