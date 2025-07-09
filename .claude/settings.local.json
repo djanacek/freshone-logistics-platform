@@ -16,7 +16,10 @@
       "Bash(pkill:*)",
       "Bash(find:*)",
       "Bash(env)",
-      "Bash(cd:*)"
+      "Bash(cd:*)",
+      "Bash(awk:*)",
+      "Bash(git add:*)",
+      "Bash(git config:*)"
     ],
     "deny": []
   }
