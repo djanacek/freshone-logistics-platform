@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rg:*)",
+      "Bash(npm run dev:*)",
+      "Bash(rm:*)",
+      "Bash(npm install)",
+      "Bash(npm install:*)",
+      "WebFetch(domain:docs.nextbillion.ai)",
+      "Bash(grep:*)",
+      "Bash(npm run build:*)",
+      "Bash(curl:*)",
+      "Bash(node:*)",
+      "Bash(npm run lint)",
+      "Bash(sed:*)",
+      "Bash(pkill:*)",
+      "Bash(find:*)",
+      "Bash(env)",
+      "Bash(cd:*)"
+    ],
+    "deny": []
+  }
+}
